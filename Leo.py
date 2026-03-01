@@ -68,6 +68,7 @@ from Modules.FootballCom.fb_manager import run_odds_harvesting, run_automated_bo
 from Core.System.monitoring import run_chapter_3_oversight
 from Scripts.recommend_bets import get_recommendations
 from Modules.Assets.asset_manager import sync_team_assets, sync_league_assets, sync_region_flags
+from Scripts.football_logos import download_all_logos
 
 # Configuration
 CYCLE_WAIT_HOURS = int(os.getenv('LEO_CYCLE_WAIT_HOURS', 6))
@@ -380,6 +381,12 @@ async def run_utility(args):
         sync_region_flags()
         print("  [SUCCESS] Asset sync complete.")
 
+    elif args.logos:
+        print("\n  --- LEO: Download Football Logo Packs ---")
+        limit = getattr(args, 'limit', None)
+        download_all_logos(limit=limit)
+        print("  [SUCCESS] Logo download complete.")
+
 
 # ============================================================
 # DISPATCH — Routes CLI args to the appropriate functions
@@ -552,7 +559,8 @@ if __name__ == "__main__":
     is_utility = any([args.sync, args.recommend, args.accuracy,
                       args.search_dict, args.review, args.backtest,
                       args.rule_engine, args.streamer, args.schedule,
-                      args.enrich, args.enrich_leagues, args.assets])
+                      args.enrich, args.enrich_leagues, args.assets,
+                      args.logos])
     is_granular = args.prologue or args.chapter is not None
 
     try:

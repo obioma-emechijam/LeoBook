@@ -85,6 +85,7 @@ def setup_terminal_logging(args):
         elif args.prologue: prefix = "leo_prologue_session"
         elif args.chapter: prefix = f"leo_chapter{args.chapter}_session"
         elif args.assets: prefix = "leo_assets_session"
+        elif args.logos: prefix = "leo_logos_session"
 
     TERMINAL_LOG_DIR = LOG_DIR / "Terminal"
     TERMINAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -151,6 +152,8 @@ Examples:
   python Leo.py --rule-engine --set-default "James' Law"   Set engine as default
   python Leo.py --assets                   Sync all team and league assets
   python Leo.py --assets --limit 10         Sync assets with a limit
+  python Leo.py --logos                     Download all football team logo packs
+  python Leo.py --logos --limit 5           Download first 5 league logo packs
         """
     )
     # --- Granular Chapter / Page Selection ---
@@ -192,6 +195,8 @@ Examples:
                        help='Sync team and league assets (crests/logos) to Supabase Storage')
     parser.add_argument('--limit', type=int, metavar='N',
                        help='Limit the number of items processed (useful for testing)')
+    parser.add_argument('--logos', action='store_true',
+                       help='Download football team logo packs from football-logos.cc')
 
     # --- Rule Engine Management ---
     parser.add_argument('--rule-engine', action='store_true',
