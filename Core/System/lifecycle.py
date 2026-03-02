@@ -86,6 +86,7 @@ def setup_terminal_logging(args):
         elif args.chapter: prefix = f"leo_chapter{args.chapter}_session"
         elif args.assets: prefix = "leo_assets_session"
         elif args.logos: prefix = "leo_logos_session"
+        elif args.scrape_leagues: prefix = "leo_scrape_leagues_session"
 
     TERMINAL_LOG_DIR = LOG_DIR / "Terminal"
     TERMINAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -154,6 +155,9 @@ Examples:
   python Leo.py --assets --limit 10         Sync assets with a limit
   python Leo.py --logos                     Download all football team logo packs
   python Leo.py --logos --limit 5           Download first 5 league logo packs
+  python Leo.py --scrape-leagues            Scrape Flashscore league pages -> SQLite
+  python Leo.py --scrape-leagues --limit 5  Scrape first 5 unprocessed leagues
+  python Leo.py --scrape-leagues --reset    Reset and scrape all leagues
         """
     )
     # --- Granular Chapter / Page Selection ---
@@ -197,6 +201,10 @@ Examples:
                        help='Limit the number of items processed (useful for testing)')
     parser.add_argument('--logos', action='store_true',
                        help='Download football team logo packs from football-logos.cc')
+    parser.add_argument('--scrape-leagues', action='store_true',
+                       help='Scrape Flashscore league pages -> SQLite (New Pipeline)')
+    parser.add_argument('--reset-leagues', action='store_true',
+                       help='Reset all leagues to unprocessed (use with --scrape-leagues)')
 
     # --- Rule Engine Management ---
     parser.add_argument('--rule-engine', action='store_true',

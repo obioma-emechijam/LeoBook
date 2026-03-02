@@ -69,6 +69,7 @@ from Core.System.monitoring import run_chapter_3_oversight
 from Scripts.recommend_bets import get_recommendations
 from Modules.Assets.asset_manager import sync_team_assets, sync_league_assets, sync_region_flags
 from Scripts.football_logos import download_all_logos
+from Scripts.scrape_leagues import main as run_league_scraper
 
 # Configuration
 CYCLE_WAIT_HOURS = int(os.getenv('LEO_CYCLE_WAIT_HOURS', 6))
@@ -386,6 +387,12 @@ async def run_utility(args):
         limit = getattr(args, 'limit', None)
         download_all_logos(limit=limit)
         print("  [SUCCESS] Logo download complete.")
+
+    elif args.scrape_leagues:
+        print("\n  --- LEO: Flashscore League Scraper ---")
+        limit = getattr(args, 'limit', None)
+        reset = getattr(args, 'reset_leagues', False) or getattr(args, 'reset', False)
+        await run_league_scraper(limit=limit, reset=reset)
 
 
 # ============================================================
