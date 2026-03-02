@@ -194,8 +194,6 @@ Examples:
                        help='Also extract H2H + standings per match (use with --schedule)')
     parser.add_argument('--enrich', action='store_true',
                        help='Run manual metadata enrichment (gap-fill for historical data)')
-    parser.add_argument('--enrich-leagues', action='store_true',
-                       help='Visit league pages to fill Unknown metadata in region_league, schedules, and teams')
     parser.add_argument('--assets', action='store_true',
                        help='Sync team and league assets (crests/logos) to Supabase Storage')
     parser.add_argument('--limit', type=int, metavar='N',

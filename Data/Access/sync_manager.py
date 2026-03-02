@@ -21,7 +21,7 @@ from supabase import create_client, Client
 from Data.Access.supabase_client import get_supabase_client
 from Data.Access.db_helpers import DB_DIR, files_and_headers
 from Core.Intelligence.aigo_suite import AIGOSuite
-from Data.Supabase.push_schema import push_schema
+
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +63,7 @@ class SyncManager:
 
         logger.info("Starting hardened bi-directional sync on startup...")
         
-        # Phase 0: Auto-Provision Supabase Schema
-        print("   [PROLOGUE] Auto-provisioning Supabase Database Schema...")
-        schema_ok = push_schema()
-        if not schema_ok:
-            print("   [WARNING] Schema auto-provision failed. Ensure 'execute_sql' RPC exists and Service Key is in .env.")
+
             
         print("   [PROLOGUE] Bi-Directional Sync — comparing local CSV vs Supabase timestamps...")
 
@@ -414,14 +410,7 @@ class SyncManager:
 async def run_full_sync(session_name: str = "Periodic"):
     """Wrapper to sync ALL tables with audit logging and AIGO protection."""
     from Data.Access.db_helpers import log_audit_event
-    from Data.Supabase.push_schema import push_schema
-    
     logger.info(f"Starting global full sync [{session_name}]...")
-    
-    print("   [PROLOGUE] Auto-provisioning Supabase Database Schema before sync...")
-    schema_ok = push_schema()
-    if not schema_ok:
-        print("   [WARNING] Schema auto-provision failed. Ensure 'execute_sql' and 'refresh_schema' RPCs exist and Service Key is in .env.")
             
     manager = SyncManager()
     
