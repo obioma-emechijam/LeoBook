@@ -915,4 +915,3 @@ if __name__ == "__main__":
     asyncio.run(main(limit=args.limit, reset=args.reset,
                      num_seasons=args.seasons, all_seasons=args.all_seasons,
                      weekly=args.weekly))
-                     num_seasons=args.seasons, all_seasons=args.all_seasons))
