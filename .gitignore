@@ -42,6 +42,8 @@ logs/
 *.png
 *.jpg
 *.jpeg
+# Exception: Flutter app Android resources (launcher icons, etc.)
+!leobookapp/android/app/src/main/res/**
 
 # OS
 .DS_Store
