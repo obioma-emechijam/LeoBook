@@ -16,7 +16,7 @@ LeoBook is an **autonomous sports prediction and betting system** with two halve
 | `Leo.py` | Python 3.12 + Playwright + PyTorch | Autonomous data extraction, rule-based + neural RL prediction, odds harvesting, automated bet placement, and dynamic task scheduling |
 | `leobookapp/` | Flutter/Dart | Cross-platform dashboard with "Telegram-grade" UI density, Liquid Glass aesthetics, and real-time streaming |
 
-**Leo.py** is an **autonomous orchestrator** powered by a **dynamic Task Scheduler** (`Core/System/scheduler.py`). It no longer relies on a static 6h loop; instead, it wakes up at target task times (e.g., Weekly Enrichment at Monday 2:26am) or operates at default intervals. The system enforces **Data Readiness Gates** (Prologue P1-P3) to ensure data integrity before predictions. **Standings** are now computed on-the-fly via a Postgres VIEW in Supabase, eliminating redundant sync tables.
+**Leo.py** is an **autonomous orchestrator** powered by a **dynamic Task Scheduler** (`Core/System/scheduler.py`). It no longer relies on a static 6h loop; instead, it wakes up at target task times (e.g., Weekly Enrichment at Monday 2:26am) or operates at default intervals. The system enforces **Data Readiness Gates** (Prologue P1-P3) to ensure data integrity before predictions. **Standings** are now computed on-the-fly via a Postgres VIEW in Supabase. Cloud sync uses **watermark-based delta detection** — only rows modified since the last sync are compared, not full table scans.
 
 For the complete file inventory and step-by-step execution trace, see [LeoBook_Technical_Master_Report.md](LeoBook_Technical_Master_Report.md).
 
@@ -124,7 +124,7 @@ bash .devcontainer/setup.sh         # Auto-config system environment
 
 # Execution
 python Leo.py              # Autonomous Orchestrator (Full dynamic cycle)
-python Leo.py --sync        # Bi-directional cloud sync (Bootstrap parity)
+python Leo.py --sync        # Watermark-based cloud sync (delta only)
 python Leo.py --prologue    # Data readiness check (P1-P3)
 python Leo.py --chapter 1   # Prediction pipeline (Odds → Predict → Sync)
 python Leo.py --chapter 2   # Betting automation
@@ -139,6 +139,7 @@ python Leo.py --enrich-leagues --reset     # Full reset: re-enrich ALL leagues
 python Leo.py --enrich-leagues --season 1  # Target ONLY the most recent past season
 python Leo.py --enrich-leagues --seasons 2 # Extract last 2 seasons per league
 python Leo.py --train-rl               # Chronological RL model training
+python Leo.py --rule-engine --backtest # Progressive backtest with default engine
 python Leo.py --help                    # Comprehensive CLI command catalog
 ```
 
@@ -167,5 +168,5 @@ python Leo.py --help                    # Comprehensive CLI command catalog
 
 ---
 
-*Last updated: March 3, 2026 (v7.0 — Enrichment Pipeline Bug Fixes + Selector Compliance)*
+*Last updated: March 5, 2026 (v7.1 — Watermark Delta Sync + CLI Cleanup)*
 *LeoBook Engineering Team*

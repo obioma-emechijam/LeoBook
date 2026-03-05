@@ -19,7 +19,7 @@ LeoBook is an **autonomous sports prediction and betting system** comprised of t
 | **Backend (Leo.py)** | Python 3.12 + Playwright + PyTorch | Autonomous data extraction, rule-based + neural RL prediction, odds harvesting, automated bet placement, and **dynamic task scheduling** |
 | **Frontend (leobookapp)** | Flutter/Dart (flutter_bloc/Cubit) | Dashboard with "Telegram-grade" density, liquid glass aesthetics, and proportional scaling |
 
-**Leo.py** is an **autonomous orchestrator** powered by a **dynamic Task Scheduler** (`Core/System/scheduler.py`). It no longer relies on a static 6h loop; instead, it wakes up at target task times or operates at default intervals. The system enforces **Data Readiness Gates** (Prologue P1-P3) to ensure data integrity before predictions. **Standings** are now computed on-the-fly via a Postgres VIEW in Supabase, eliminating redundant sync tables.
+**Leo.py** is an **autonomous orchestrator** powered by a **dynamic Task Scheduler** (`Core/System/scheduler.py`). It no longer relies on a static 6h loop; instead, it wakes up at target task times or operates at default intervals. The system enforces **Data Readiness Gates** (Prologue P1-P3) to ensure data integrity before predictions. **Standings** are now computed on-the-fly via a Postgres VIEW in Supabase. Cloud sync uses **watermark-based delta detection** — only rows modified since the last sync are compared.
 
 ---
 
@@ -56,7 +56,7 @@ LeoBook is an **autonomous sports prediction and betting system** comprised of t
 | File | Function |
 |------|----------|
 | `Data/Access/league_db.py` | SQLite schema, **`computed_standings()`** helper |
-| `Data/Access/sync_manager.py` | `SyncManager` — bi-directional sync (minus computed tables) |
+| `Data/Access/sync_manager.py` | `SyncManager` — watermark-based delta sync (only changed rows since last sync) |
 | `Data/Access/outcome_reviewer.py` | Outcome review logic |
 
 ### 2.5 `Scripts/` — Pipeline Scripts
@@ -121,9 +121,9 @@ Leo.py orchestrates the cycle with autonomous task management:
     - **P3: AI Gate**: RL Adapter training check.
     - *Auto-remediation triggers if any gate fails.*
 3. **Chapter 1: Prediction Pipeline**:
-    - **P1**: URL Resolution & Odds Harvesting.
-    - **P2**: Predictions (Constraint: Max 1/team/week). Surplus matches added to Scheduler.
-    - **P3**: Final Chapter Sync & Recommendation Generation.
+    - **P1**: URL Resolution & Odds Harvesting (no sync).
+    - **P2**: Predictions (Constraint: Max 1/team/week). Surplus matches added to Scheduler (no sync).
+    - **P3**: Final Chapter Sync (watermark-based delta) & Recommendation Generation.
 4. **Chapter 2: Betting & Funds**:
     - **P1**: Automated Booking on Football.com.
     - **P2**: Funds balance + withdrawal check.
@@ -169,5 +169,5 @@ flowchart LR
 ```
 
 ---
-*Last updated: March 3, 2026 (v7.0 — Autonomous Scheduler Architecture)*
+*Last updated: March 5, 2026 (v7.1 — Watermark Delta Sync + CLI Cleanup)*
 *LeoBook Engineering Team*

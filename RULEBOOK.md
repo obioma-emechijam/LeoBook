@@ -14,6 +14,7 @@ Before writing ANY code, ask in this exact order:
 4. **Accelerate** — Can this run concurrently or be parallelized?
 5. **Automate** — Can Leo.py orchestrate this without human intervention?
 
+**Summary of First Principles Thinking** - **Question** every requirements and make it less dumb and **delete** those that are dumb and useless(no "incase-we-need-it" ideology), then **simplify**, **accelerate** and **automate** all those  that remain. This is MUSK do, throughout the entire **LeoBook** codebase -local and cloud.
 ---
 
 ## 2. Backend Architecture (Python)
@@ -28,10 +29,12 @@ Before writing ANY code, ask in this exact order:
 ### 2.2 Startup Bootstrapping (MANDATORY)
 
 Every entry point (`main()`) MUST call `await run_startup_sync()`. This function ensures:
-1. SQLite parity with Supabase.
+1. SQLite parity with Supabase via **watermark-based delta sync** (only rows modified since last sync are fetched — NOT full table scans).
 2. Local database existence.
 3. Supabase table existence.
 Operations MUST NOT start (including live streamer) until startup sync completes successfully.
+
+**Sync runs ONLY in Ch1 P3** (Final Sync). Ch1 P1 and Ch1 P2 do NOT sync — sync is consolidated to avoid redundant 20+ minute full-table scans.
 
 ### 2.3 Data Readiness Gates (Prologue)
 
@@ -225,6 +228,6 @@ python -c "from Core.System.data_readiness import DataReadinessChecker; print('[
 
 ---
 
-*Last updated: March 3, 2026 (v7.0 — Autonomous Scheduler Architecture)*
+*Last updated: March 5, 2026 (v7.1 — Watermark Delta Sync + CLI Cleanup)*
 *Authored by: LeoBook Engineering Team*
 

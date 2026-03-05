@@ -122,14 +122,13 @@ Examples:
   python Leo.py --prologue --page 1        Prologue P1: Cloud Handshake & Review
   python Leo.py --prologue --page 2        Prologue P2: Accuracy & Sync
   python Leo.py --chapter 1                Full Chapter 1 (Extraction → Odds → Sync)
-  python Leo.py --chapter 1 --page 1       Ch1 P1: Flashscore Extraction & Analysis
-  python Leo.py --chapter 1 --page 2       Ch1 P2: Odds Harvesting
+  python Leo.py --chapter 1 --page 1       Ch1 P1: URL Resolution & Odds Harvesting
+  python Leo.py --chapter 1 --page 2       Ch1 P2: Predictions (Rule Engine + RL Ensemble)
   python Leo.py --chapter 1 --page 3       Ch1 P3: Final Sync & Recommendations
   python Leo.py --chapter 2                Full Chapter 2 (Booking & Withdrawal)
   python Leo.py --chapter 2 --page 1       Ch2 P1: Automated Booking
   python Leo.py --chapter 2 --page 2       Ch2 P2: Funds & Withdrawal Check
-  python Leo.py --chapter 3                Chapter 3: Monitoring & Oversight
-  python Leo.py --sync                     Force full cloud sync
+  python Leo.py --sync                     Force watermark-based cloud sync
   python Leo.py --recommend                Generate and display recommendations only
   python Leo.py --accuracy                 Print accuracy report only
   python Leo.py --search-dict              Rebuild the search dictionary from SQLite
