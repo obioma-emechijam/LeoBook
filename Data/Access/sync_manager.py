@@ -245,38 +245,50 @@ class SyncManager:
             return False
 
     async def sync_on_startup(self):
-        """Pull remote changes and push local changes for all configured tables."""
+        """Push local changes to Supabase for all configured tables.
+        If local table is empty, bootstrap by pulling from Supabase (one-time)."""
         if not self.supabase:
             return
 
-        logger.info("Starting bi-directional sync on startup...")
-        print("   [PROLOGUE] Bi-Directional Sync -- comparing local SQLite vs Supabase timestamps...")
+        logger.info("Starting push-only sync on startup...")
+        print("   [SYNC] Push-Only Sync — local SQLite → Supabase...")
 
         for table_key, config in TABLE_CONFIG.items():
             await self._sync_table(table_key, config)
 
     async def _sync_table(self, table_key: str, config: Dict):
-        """Sync a single table using watermark-based delta detection.
-        Only fetches rows modified since the last sync — O(delta) not O(total)."""
+        """Push-only sync: push local changes to Supabase since last watermark.
+        If local table is empty, bootstrap by pulling from Supabase (one-time).
+        ZERO reads from Supabase during normal operation."""
         local_table = config['local_table']
         remote_table = config['remote_table']
         key_field = config['key']
 
-        logger.info(f"  Syncing {local_table} <-> {remote_table}...")
+        logger.info(f"  Syncing {local_table} → {remote_table}...")
 
+        # 1. Check if local table is empty → bootstrap from Supabase
+        try:
+            local_count = self.conn.execute(f"SELECT COUNT(*) FROM {local_table}").fetchone()[0]
+        except Exception:
+            local_count = 0
+
+        if local_count == 0:
+            print(f"   [{remote_table}] Empty local — bootstrapping from Supabase...")
+            pulled = await self._bootstrap_from_remote(local_table, remote_table, key_field)
+            if pulled > 0:
+                self._set_watermark(remote_table, datetime.utcnow().isoformat())
+                print(f"   [{remote_table}] ✓ Bootstrapped {pulled} rows from Supabase")
+            else:
+                print(f"   [{remote_table}] ✓ Both local and remote empty")
+            return
+
+        # 2. Push-only: query local rows modified since watermark
         watermark = self._get_watermark(remote_table)
         is_first_sync = watermark == '1970-01-01T00:00:00'
 
-        # 1. Fetch Remote Delta (only rows changed since watermark)
-        try:
-            remote_delta = await self._fetch_remote_delta(remote_table, key_field, watermark)
-        except Exception as e:
-            logger.error(f"    [x] Failed to fetch remote delta for {remote_table}: {e}")
-            return
-
-        # 2. Fetch Local Delta (only rows changed since watermark)
         try:
             if is_first_sync:
+                # First sync ever: push ALL local rows
                 local_rows = query_all(self.conn, local_table)
                 if not local_rows:
                     local_rows = []
@@ -286,166 +298,108 @@ class SyncManager:
                     (watermark,)
                 ).fetchall()
                 local_rows = [dict(r) for r in local_rows]
-            local_delta = {str(r.get(key_field, '')): r.get('last_updated', '') for r in local_rows if r.get(key_field)}
         except Exception as e:
             logger.error(f"    [x] Failed to query local {local_table}: {e}")
             return
 
-        # 3. Delta Detection (Latest Wins) — only on changed rows
-        all_keys = set(local_delta.keys()) | set(remote_delta.keys())
+        if not local_rows:
+            print(f"   [{remote_table}] ✓ Nothing to push")
+            return
 
-        def normalize_ts(ts):
-            if not ts or ts in ('None', 'nan', ''):
-                return '1970-01-01T00:00:00'
-            try:
-                return pd.to_datetime(ts, utc=True).strftime('%Y-%m-%dT%H:%M:%S')
-            except Exception:
-                return '1970-01-01T00:00:00'
+        print(f"   [{remote_table}] Pushing {len(local_rows)} rows to Supabase...")
 
-        to_push_ids = []
-        to_pull_ids = []
+        # 3. Push to Supabase
+        await self.batch_upsert(table_key, local_rows)
 
-        for key in all_keys:
-            local_ts = normalize_ts(local_delta.get(key, ''))
-            remote_ts = normalize_ts(remote_delta.get(key, ''))
+        # 4. Verify a sample
+        push_ids = [str(r.get(key_field, '')) for r in local_rows if r.get(key_field)]
+        if push_ids:
+            await self._verify_sync_parity(table_key, push_ids)
 
-            if local_ts > remote_ts or (local_ts != '1970-01-01T00:00:00' and remote_ts == '1970-01-01T00:00:00'):
-                to_push_ids.append(key)
-            elif remote_ts > local_ts or (remote_ts != '1970-01-01T00:00:00' and local_ts == '1970-01-01T00:00:00'):
-                to_pull_ids.append(key)
+        # 5. Update watermark to the latest local timestamp
+        max_ts = None
+        for r in local_rows:
+            ts = r.get('last_updated', '')
+            if ts and ts not in ('None', 'nan', ''):
+                try:
+                    norm = pd.to_datetime(ts, utc=True).strftime('%Y-%m-%dT%H:%M:%S')
+                    if max_ts is None or norm > max_ts:
+                        max_ts = norm
+                except Exception:
+                    pass
+        if max_ts:
+            self._set_watermark(remote_table, max_ts)
 
-        logger.info(f"    Delta: {len(to_push_ids)} to push, {len(to_pull_ids)} to pull.")
-
-        if to_push_ids and to_pull_ids:
-            print(f"   [{remote_table}] Bi-directional: {len(to_push_ids)} local->remote, {len(to_pull_ids)} remote->local")
-        elif to_push_ids:
-            print(f"   [{remote_table}] Push: {len(to_push_ids)} rows local->remote")
-        elif to_pull_ids:
-            print(f"   [{remote_table}] Pull: {len(to_pull_ids)} rows remote->local")
-        else:
-            print(f"   [{remote_table}] OK: Already in sync")
-
-        # 4. Pull Operations
-        if to_pull_ids:
-            await self._pull_updates(local_table, remote_table, key_field, to_pull_ids)
-
-        # 5. Push Operations
-        if to_push_ids:
-            rows_to_push = [r for r in local_rows if str(r.get(key_field, '')) in set(to_push_ids)]
-            await self.batch_upsert(table_key, rows_to_push)
-            await self._verify_sync_parity(table_key, to_push_ids)
-
-        # 6. Update watermark to max timestamp seen
-        all_ts = []
-        for ts in list(local_delta.values()) + list(remote_delta.values()):
-            norm = normalize_ts(ts)
-            if norm != '1970-01-01T00:00:00':
-                all_ts.append(norm)
-        if all_ts:
-            new_watermark = max(all_ts)
-            self._set_watermark(remote_table, new_watermark)
-
-    async def _fetch_remote_delta(self, table_name: str, key_field: str, watermark: str) -> Dict[str, str]:
-        """Fetch ID:last_updated pairs from Supabase for rows modified after watermark.
-        On first sync (watermark=epoch), fetches everything."""
-        remote_map = {}
+    async def _bootstrap_from_remote(self, local_table: str, remote_table: str,
+                                      key_field: str) -> int:
+        """Pull ALL rows from Supabase into empty local SQLite. One-time bootstrap."""
+        total_pulled = 0
         batch_size = 1000
         offset = 0
-        is_first_sync = watermark == '1970-01-01T00:00:00'
 
         while True:
             try:
-                query = self.supabase.table(table_name).select(f"{key_field},last_updated")
-                if not is_first_sync:
-                    query = query.gt('last_updated', watermark)
-                query = query.order('last_updated', desc=False).range(offset, offset + batch_size - 1)
-                res = query.execute()
+                res = self.supabase.table(remote_table).select("*").order(
+                    key_field, desc=False
+                ).range(offset, offset + batch_size - 1).execute()
                 rows = res.data
                 if not rows:
                     break
-                for r in rows:
-                    k = r.get(key_field)
-                    if k:
-                        remote_map[str(k)] = r.get('last_updated', '')
+
+                # Insert into local SQLite
+                table_cols = [c[1] for c in self.conn.execute(
+                    f"PRAGMA table_info({local_table})"
+                ).fetchall()]
+
+                for row in rows:
+                    # Handle over_2.5 → over_2_5
+                    if 'over_2.5' in row:
+                        row['over_2_5'] = row.pop('over_2.5')
+
+                    filtered = {k: v for k, v in row.items()
+                                if k in table_cols and v is not None}
+                    if not filtered or key_field not in filtered:
+                        continue
+
+                    cols = list(filtered.keys())
+                    placeholders = ", ".join([f":{c}" for c in cols])
+                    col_str = ", ".join(cols)
+                    updates = ", ".join([f"{c} = excluded.{c}" for c in cols if c != key_field])
+
+                    try:
+                        self.conn.execute(
+                            f"INSERT INTO {local_table} ({col_str}) VALUES ({placeholders}) "
+                            f"ON CONFLICT({key_field}) DO UPDATE SET {updates}",
+                            filtered,
+                        )
+                    except Exception as e:
+                        logger.warning(f"      [Bootstrap] Row insert failed: {e}")
+
+                self.conn.commit()
+                total_pulled += len(rows)
+
                 if len(rows) < batch_size:
                     break
                 offset += batch_size
+
             except Exception as e:
                 err_str = str(e)
                 if 'PGRST205' in err_str or 'Could not find the table' in err_str:
-                    logger.info(f"      [AUTO] Table '{table_name}' not found — attempting auto-create...")
-                    if self._ensure_remote_table(table_name):
+                    logger.info(f"      [AUTO] Table '{remote_table}' not found — creating...")
+                    if self._ensure_remote_table(remote_table):
                         continue
                     else:
-                        logger.warning(f"      [!] Could not auto-create '{table_name}'. Skipping.")
+                        break
                 else:
-                    logger.error(f"      [x] Delta fetch error at offset {offset}: {e}")
-                break
+                    logger.error(f"      [Bootstrap] Pull failed at offset {offset}: {e}")
+                    break
 
-        return remote_map
+        if total_pulled > 0:
+            logger.info(f"    [BOOTSTRAP] Pulled {total_pulled} rows into {local_table}.")
+        return total_pulled
 
-    async def _pull_updates(self, local_table: str, remote_table: str,
-                            key_field: str, ids: List[str]):
-        """Fetch rows from Supabase and upsert into local SQLite."""
-        if not ids:
-            return
-
-        logger.info(f"    Pulling {len(ids)} rows from remote...")
-
-        pulled_data = []
-        batch_size = 200
-        pbar = tqdm(total=len(ids), desc=f"    Pulling {remote_table}", unit="row")
-        for i in range(0, len(ids), batch_size):
-            batch_ids = ids[i:i + batch_size]
-            res = self.supabase.table(remote_table).select("*").in_(key_field, batch_ids).execute()
-            pulled_data.extend(res.data)
-            pbar.update(len(batch_ids))
-        pbar.close()
-
-        if not pulled_data:
-            return
-
-        # No column renames needed — unified naming
-        rename_map = {}
-        # Also handle over_2_5 -> over_2_5 (already correct in SQLite)
-
-        for row in pulled_data:
-            # Rename columns
-            renamed = {}
-            for k, v in row.items():
-                new_k = rename_map.get(k, k)
-                renamed[new_k] = v
-            
-            # Handle over_2_5 normalization
-            if 'over_2.5' in renamed:
-                renamed['over_2_5'] = renamed.pop('over_2.5')
-
-            # Date normalization (PostgreSQL YYYY-MM-DD -> keep as-is for SQLite)
-            # SQLite stores dates as text, no conversion needed
-
-            # Get columns that exist in the local table
-            table_cols = [c[1] for c in self.conn.execute(f"PRAGMA table_info({local_table})").fetchall()]
-            filtered = {k: v for k, v in renamed.items() if k in table_cols and v is not None}
-
-            if not filtered or key_field not in filtered:
-                continue
-
-            cols = list(filtered.keys())
-            placeholders = ", ".join([f":{c}" for c in cols])
-            col_str = ", ".join(cols)
-            updates = ", ".join([f"{c} = excluded.{c}" for c in cols if c != key_field])
-
-            try:
-                self.conn.execute(
-                    f"INSERT INTO {local_table} ({col_str}) VALUES ({placeholders}) "
-                    f"ON CONFLICT({key_field}) DO UPDATE SET {updates}",
-                    filtered,
-                )
-            except Exception as e:
-                logger.warning(f"      [Pull] Failed to upsert row: {e}")
-
-        self.conn.commit()
-        logger.info(f"    [SUCCESS] Pulled {len(pulled_data)} rows into {local_table}.")
+    # _pull_updates removed — replaced by _bootstrap_from_remote above.
+    # Push-only sync: Supabase is a read-only mirror, no per-ID pulls needed.
 
     async def batch_upsert(self, table_key: str, data: List[Dict[str, Any]]):
         """Upsert a batch of data to Supabase with strict cleaning."""
@@ -486,6 +440,16 @@ class SyncManager:
                             val = f"{y}-{m}-{d}"
                         elif not re.match(r'^\d{4}-\d{2}-\d{2}', val):
                             val = None
+
+                    # Sanitize integer score columns: "-" → None
+                    if out_key in ('home_score', 'away_score'):
+                        if val in ('-', '--', '?'):
+                            val = None
+                        elif val is not None:
+                            try:
+                                val = int(val)
+                            except (ValueError, TypeError):
+                                val = None
 
                     if out_key == 'over_2.5' or out_key == 'over_2_5':
                         clean['over_2_5'] = val
