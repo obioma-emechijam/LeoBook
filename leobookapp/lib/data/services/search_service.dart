@@ -21,37 +21,38 @@ class SearchService {
       // 1. Search Teams — name, search_terms, abbreviations (all text ILIKE)
       final teamResults = await _supabase
           .from('teams')
-          .select('team_id, team_name, team_crest, search_terms, abbreviations')
-          .or('team_name.ilike.%$q%,search_terms.ilike.%$q%,abbreviations.ilike.%$q%')
+          .select('team_id, name, crest, search_terms, abbreviations')
+          .or('name.ilike.%$q%,search_terms.ilike.%$q%,abbreviations.ilike.%$q%')
           .limit(10);
 
       for (var t in (teamResults as List)) {
         results.add({
           'id': t['team_id']?.toString() ?? '',
-          'name': t['team_name']?.toString() ?? '',
+          'name': t['name']?.toString() ?? '',
           'type': 'team',
-          'crest': t['team_crest']?.toString() ?? '',
+          'crest': t['crest']?.toString() ?? '',
         });
       }
 
-      // 2. Search Leagues (region_league table)
+      // 2. Search Leagues
       final leagueResults = await _supabase
-          .from('region_league')
+          .from('leagues')
           .select(
-              'league_id, region, league, league_crest, search_terms, abbreviations')
-          .or('league.ilike.%$q%,region.ilike.%$q%,search_terms.ilike.%$q%,abbreviations.ilike.%$q%')
+              'league_id, continent, name, crest, search_terms, abbreviations')
+          .or('name.ilike.%$q%,continent.ilike.%$q%,search_terms.ilike.%$q%,abbreviations.ilike.%$q%')
           .limit(10);
 
       for (var l in (leagueResults as List)) {
-        final region = l['region']?.toString() ?? '';
-        final league = l['league']?.toString() ?? '';
-        final displayName = region.isNotEmpty ? '$region - $league' : league;
+        final continent = l['continent']?.toString() ?? '';
+        final league = l['name']?.toString() ?? '';
+        final displayName =
+            continent.isNotEmpty ? '$continent: $league' : league;
         results.add({
           'id': l['league_id']?.toString() ?? '',
           'name': displayName,
           'type': 'league',
-          'crest': l['league_crest']?.toString() ?? '',
-          'region': region,
+          'crest': l['crest']?.toString() ?? '',
+          'region': continent,
         });
       }
 

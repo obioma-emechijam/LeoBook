@@ -44,9 +44,9 @@ class StandingModel {
 
   factory StandingModel.fromJson(Map<String, dynamic> json) {
     return StandingModel(
-      teamName: _clean(json['team_name']?.toString() ?? ''),
+      teamName: _clean((json['team_name'] ?? json['name'])?.toString() ?? ''),
       teamId: json['team_id']?.toString(),
-      teamCrestUrl: json['team_crest']?.toString(),
+      teamCrestUrl: (json['team_crest'] ?? json['crest'])?.toString(),
       position: (json['position'] as num?)?.toInt() ?? 0,
       played: (json['played'] as num?)?.toInt() ?? 0,
       wins: (json['wins'] as num?)?.toInt() ?? 0,

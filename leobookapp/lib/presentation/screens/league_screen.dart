@@ -5,7 +5,10 @@
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:leobookapp/core/constants/app_colors.dart';
+import 'package:leobookapp/data/models/league_model.dart';
+import 'package:leobookapp/data/repositories/data_repository.dart';
 import '../widgets/shared/leo_tab.dart';
 import '../widgets/shared/main_top_bar.dart';
 import '../widgets/shared/league_tabs/overview_tab.dart';
@@ -30,11 +33,21 @@ class LeagueScreen extends StatefulWidget {
 class _LeagueScreenState extends State<LeagueScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
+  final DataRepository _repo = DataRepository();
+  LeagueModel? _league;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 4, vsync: this);
+    _loadLeagueData();
+  }
+
+  Future<void> _loadLeagueData() async {
+    final league = await _repo.fetchLeagueById(widget.leagueId);
+    if (mounted) {
+      setState(() => _league = league);
+    }
   }
 
   @override
@@ -94,11 +107,31 @@ class _LeagueScreenState extends State<LeagueScreen>
                                   : Colors.black.withValues(alpha: 0.1),
                             ),
                           ),
-                          child: const Icon(
-                            Icons.emoji_events_outlined,
-                            size: 18,
-                            color: AppColors.primary,
-                          ),
+                          child: _league?.crest != null &&
+                                  _league!.crest!.startsWith('http')
+                              ? ClipOval(
+                                  child: CachedNetworkImage(
+                                    imageUrl: _league!.crest!,
+                                    width: 32,
+                                    height: 32,
+                                    fit: BoxFit.cover,
+                                    placeholder: (_, __) => const Icon(
+                                      Icons.emoji_events_outlined,
+                                      size: 18,
+                                      color: AppColors.primary,
+                                    ),
+                                    errorWidget: (_, __, ___) => const Icon(
+                                      Icons.emoji_events_outlined,
+                                      size: 18,
+                                      color: AppColors.primary,
+                                    ),
+                                  ),
+                                )
+                              : const Icon(
+                                  Icons.emoji_events_outlined,
+                                  size: 18,
+                                  color: AppColors.primary,
+                                ),
                         ),
                         Column(
                           mainAxisSize: MainAxisSize.min,
@@ -115,7 +148,7 @@ class _LeagueScreenState extends State<LeagueScreen>
                               ),
                             ),
                             Text(
-                              "Season 2024/25".toUpperCase(),
+                              (_league?.currentSeason ?? '').toUpperCase(),
                               style: GoogleFonts.lexend(
                                 fontSize: 10,
                                 fontWeight: FontWeight.w700,

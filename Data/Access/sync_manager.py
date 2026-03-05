@@ -27,9 +27,9 @@ logger = logging.getLogger(__name__)
 # key: primary key / conflict field
 TABLE_CONFIG = {
     'predictions':      {'local_table': 'predictions',      'remote_table': 'predictions',      'key': 'fixture_id'},
-    'schedules':        {'local_table': 'fixtures',         'remote_table': 'schedules',        'key': 'fixture_id'},
+    'schedules':        {'local_table': 'schedules',        'remote_table': 'schedules',        'key': 'fixture_id'},
     'teams':            {'local_table': 'teams',            'remote_table': 'teams',            'key': 'team_id'},
-    'region_league':    {'local_table': 'leagues',          'remote_table': 'region_league',    'key': 'league_id'},
+    'leagues':          {'local_table': 'leagues',          'remote_table': 'leagues',          'key': 'league_id'},
     'fb_matches':       {'local_table': 'fb_matches',       'remote_table': 'fb_matches',       'key': 'site_match_id'},
     'profiles':         {'local_table': 'profiles',         'remote_table': 'profiles',         'key': 'id'},
     'custom_rules':     {'local_table': 'custom_rules',     'remote_table': 'custom_rules',     'key': 'id'},
@@ -76,18 +76,18 @@ SUPABASE_SCHEMA = {
     'teams': """
         CREATE TABLE IF NOT EXISTS public.teams (
             team_id TEXT PRIMARY KEY,
-            team_name TEXT NOT NULL, league_ids JSONB, team_crest TEXT,
-            country_code TEXT, team_url TEXT,
-            country TEXT, city TEXT, stadium TEXT,
+            name TEXT NOT NULL, league_ids JSONB, crest TEXT,
+            country_code TEXT, url TEXT,
+            city TEXT, stadium TEXT,
             other_names TEXT, abbreviations TEXT, search_terms TEXT,
             last_updated TIMESTAMPTZ DEFAULT now()
         );""",
-    'region_league': """
-        CREATE TABLE IF NOT EXISTS public.region_league (
+    'leagues': """
+        CREATE TABLE IF NOT EXISTS public.leagues (
             league_id TEXT PRIMARY KEY,
             fs_league_id TEXT, country_code TEXT, continent TEXT,
-            league TEXT NOT NULL, league_crest TEXT, current_season TEXT,
-            league_url TEXT, region TEXT, region_flag TEXT, region_url TEXT,
+            name TEXT NOT NULL, crest TEXT, current_season TEXT,
+            url TEXT, region_flag TEXT,
             other_names TEXT, abbreviations TEXT, search_terms TEXT,
             date_updated TEXT,
             last_updated TIMESTAMPTZ DEFAULT now()
@@ -155,32 +155,9 @@ SUPABASE_SCHEMA = {
         );""",
 }
 
-# Column renames: SQLite column -> Supabase column (where they differ)
-_COL_RENAME_PUSH = {
-    'fixtures': {
-        'time': 'match_time',
-        'home_team_name': 'home_team',
-        'away_team_name': 'away_team',
-        'url': 'match_link',
-    },
-    'leagues': {
-        'name': 'league',
-        'crest': 'league_crest',
-        'url': 'league_url',
-    },
-    'teams': {
-        'name': 'team_name',
-        'crest': 'team_crest',
-        'url': 'team_url',
-    },
-}
-
-# Reverse: Supabase column -> SQLite column (for pull)
-_COL_RENAME_PULL = {
-    'fixtures': {v: k for k, v in _COL_RENAME_PUSH.get('fixtures', {}).items()},
-    'leagues': {v: k for k, v in _COL_RENAME_PUSH.get('leagues', {}).items()},
-    'teams': {v: k for k, v in _COL_RENAME_PUSH.get('teams', {}).items()},
-}
+# No column renames needed — unified naming across local SQLite and Supabase.
+# Columns that differ only structurally (e.g. `time` vs `match_time`) are
+# handled at the application layer, not in the sync pipeline.
 
 
 class SyncManager:
@@ -358,8 +335,8 @@ class SyncManager:
         if not pulled_data:
             return
 
-        # Apply column renames (Supabase -> SQLite)
-        rename_map = _COL_RENAME_PULL.get(local_table, {})
+        # No column renames needed — unified naming
+        rename_map = {}
         # Also handle over_2_5 -> over_2_5 (already correct in SQLite)
 
         for row in pulled_data:
@@ -412,7 +389,7 @@ class SyncManager:
         local_table = conf['local_table']
         remote_table = conf['remote_table']
         conflict_key = conf['key']
-        rename_map = _COL_RENAME_PUSH.get(local_table, {})
+        rename_map = {}  # No column renames — unified naming
 
         cleaned_data = []
         for row in data:

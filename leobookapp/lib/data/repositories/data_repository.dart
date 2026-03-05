@@ -9,6 +9,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:leobookapp/data/models/match_model.dart';
 import 'package:leobookapp/data/models/recommendation_model.dart';
 import 'package:leobookapp/data/models/standing_model.dart';
+import 'package:leobookapp/data/models/league_model.dart';
 import 'dart:convert';
 import 'dart:async';
 
@@ -200,12 +201,12 @@ class DataRepository {
           final teamNames = standings.map((s) => s.teamName).toList();
           final teamsResponse = await _supabase
               .from('teams')
-              .select('team_name, team_crest')
-              .inFilter('team_name', teamNames);
+              .select('name, crest')
+              .inFilter('name', teamNames);
           final Map<String, String> crestMap = {};
           for (var row in (teamsResponse as List)) {
-            final name = row['team_name']?.toString();
-            final crest = row['team_crest']?.toString();
+            final name = row['name']?.toString();
+            final crest = row['crest']?.toString();
             if (name != null &&
                 crest != null &&
                 crest.isNotEmpty &&
@@ -247,12 +248,11 @@ class DataRepository {
 
   Future<Map<String, String>> fetchTeamCrests() async {
     try {
-      final response =
-          await _supabase.from('teams').select('team_name, team_crest');
+      final response = await _supabase.from('teams').select('name, crest');
       final Map<String, String> crests = {};
       for (var row in (response as List)) {
-        if (row['team_name'] != null && row['team_crest'] != null) {
-          crests[row['team_name'].toString()] = row['team_crest'].toString();
+        if (row['name'] != null && row['crest'] != null) {
+          crests[row['name'].toString()] = row['crest'].toString();
         }
       }
       return crests;
@@ -264,6 +264,7 @@ class DataRepository {
 
   Future<List<MatchModel>> fetchAllSchedules({DateTime? date}) async {
     try {
+      // Schedules are stored in the fixtures table (not a separate table)
       var query = _supabase.from('schedules').select();
 
       if (date != null) {
@@ -276,7 +277,7 @@ class DataRepository {
 
       return (response as List).map((row) => MatchModel.fromCsv(row)).toList();
     } catch (e) {
-      debugPrint("DataRepository Error (Schedules): $e");
+      debugPrint("DataRepository Error (Fixtures/Schedules): $e");
       return [];
     }
   }
@@ -322,6 +323,7 @@ class DataRepository {
   }
 
   Stream<List<MatchModel>> watchSchedules({DateTime? date}) {
+    // Schedules are stored in the fixtures table
     var query = _supabase.from('schedules').stream(primaryKey: ['fixture_id']);
 
     return query.map((rows) {
@@ -344,16 +346,70 @@ class DataRepository {
   }
 
   Stream<Map<String, String>> watchTeamCrestUpdates() {
-    return _supabase
-        .from('teams')
-        .stream(primaryKey: ['team_name']).map((rows) {
+    return _supabase.from('teams').stream(primaryKey: ['name']).map((rows) {
       final Map<String, String> crests = {};
       for (var row in rows) {
-        if (row['team_name'] != null && row['team_crest'] != null) {
-          crests[row['team_name'].toString()] = row['team_crest'].toString();
+        if (row['name'] != null && row['crest'] != null) {
+          crests[row['name'].toString()] = row['crest'].toString();
         }
       }
       return crests;
     });
+  }
+
+  // --- League Data ---
+
+  Future<List<LeagueModel>> fetchLeagues() async {
+    try {
+      final response = await _supabase
+          .from('leagues')
+          .select(
+              'league_id, fs_league_id, name, crest, continent, region, region_flag, current_season, country_code, url')
+          .order('name', ascending: true);
+
+      return (response as List)
+          .map((row) => LeagueModel.fromJson(row))
+          .toList();
+    } catch (e) {
+      debugPrint("DataRepository Error (Leagues): $e");
+      return [];
+    }
+  }
+
+  Future<LeagueModel?> fetchLeagueById(String leagueId) async {
+    try {
+      final response = await _supabase
+          .from('leagues')
+          .select()
+          .eq('league_id', leagueId)
+          .maybeSingle();
+
+      if (response != null) {
+        return LeagueModel.fromJson(response);
+      }
+      return null;
+    } catch (e) {
+      debugPrint("DataRepository Error (League by ID): $e");
+      return null;
+    }
+  }
+
+  Future<List<MatchModel>> fetchFixturesByLeague(String leagueId,
+      {String? season}) async {
+    try {
+      var query =
+          _supabase.from('schedules').select().eq('league_id', leagueId);
+
+      if (season != null) {
+        query = query.eq('season', season);
+      }
+
+      final response = await query.order('date', ascending: false).limit(500);
+
+      return (response as List).map((row) => MatchModel.fromCsv(row)).toList();
+    } catch (e) {
+      debugPrint("DataRepository Error (Fixtures by League): $e");
+      return [];
+    }
   }
 }

@@ -2,20 +2,28 @@
 # Part of LeoBook Modules — Flashscore
 #
 # Functions: _propagate_status_updates(), _purge_stale_live_scores(),
-#            _review_pending_backlog(), live_score_streamer()
+#            _review_pending_backlog(), _catch_up_from_live_stream(),
+#            live_score_streamer()
 
 """
-Live Score Streamer v3
+Live Score Streamer v3.3
 Scrapes the Flashscore ALL tab every 60 seconds using its own browser context.
 Extracts live, finished, postponed, cancelled, and FRO match statuses.
 Saves results to SQLite and upserts to Supabase.
+
+Catch-Up Recovery:
+  On startup, checks live_scores for unresolved matches from the last run.
+  If ≤7 days behind: date-by-date navigation to fill gaps.
+  If >7 days behind: falls back to --enrich-leagues --refresh.
 """
 
 import asyncio
 import os
 import re
-from datetime import datetime as dt, timedelta
-from playwright.async_api import Playwright
+import subprocess
+import sys
+from datetime import datetime as dt, date, timedelta
+from playwright.async_api import Playwright, Page
 
 from Data.Access.db_helpers import (
     save_live_score_entry, log_audit_event, evaluate_market_outcome,
@@ -92,7 +100,7 @@ def _propagate_status_updates(live_matches, resolved_matches, force_finished_ids
     NO_SCORE_STATUSES = {'cancelled', 'postponed', 'fro', 'abandoned'}
 
     # --- Update fixtures (schedules) ---
-    sched_rows = query_all(conn, 'fixtures')
+    sched_rows = query_all(conn, 'schedules')
     sched_updates = []
     existing_sched_ids = set()
 
@@ -194,6 +202,7 @@ def _propagate_status_updates(live_matches, resolved_matches, force_finished_ids
                         str(updates.get('away_score', row.get('away_score', ''))),
                         row.get('home_team', ''),
                         row.get('away_team', ''),
+                        match_status=terminal_status,
                     )
                     if oc:
                         updates['outcome_correct'] = oc
@@ -209,6 +218,7 @@ def _propagate_status_updates(live_matches, resolved_matches, force_finished_ids
                     str(row.get('away_score', '')),
                     row.get('home_team', ''),
                     row.get('away_team', ''),
+                    match_status=row.get('status', ''),
                 )
                 if oc:
                     updates['outcome_correct'] = oc
@@ -228,7 +238,7 @@ def _review_pending_backlog():
     if not preds:
         return []
 
-    scheds = {r['fixture_id']: r for r in query_all(conn, 'fixtures') if r.get('fixture_id')}
+    scheds = {r['fixture_id']: r for r in query_all(conn, 'schedules') if r.get('fixture_id')}
     updates_list = []
 
     for p in preds:
@@ -249,6 +259,7 @@ def _review_pending_backlog():
                 oc = evaluate_market_outcome(
                     p.get('prediction', ''), h_score, a_score,
                     p.get('home_team', ''), p.get('away_team', ''),
+                    match_status=s_status,
                 )
                 if oc:
                     upd['outcome_correct'] = oc
@@ -314,6 +325,162 @@ async def _click_all_tab(page) -> bool:
     return False
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Catch-Up / Recovery Functions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def _navigate_to_next_day(page: Page) -> bool:
+    """Click the next-day arrow on the Flashscore calendar bar."""
+    try:
+        sel = SelectorManager.get_selector("fs_home_page", "next_day_button")
+        if not sel:
+            sel = 'button[data-day-picker-arrow="next"]'
+        await page.click(sel, timeout=5000)
+        await asyncio.sleep(2)
+        return True
+    except Exception as e:
+        print(f"   [Streamer] Failed to navigate to next day: {e}")
+        return False
+
+
+async def _navigate_to_prev_day(page: Page) -> bool:
+    """Click the prev-day arrow on the Flashscore calendar bar."""
+    try:
+        sel = SelectorManager.get_selector("fs_home_page", "prev_day_button")
+        if not sel:
+            sel = 'button[data-day-picker-arrow="prev"]'
+        await page.click(sel, timeout=5000)
+        await asyncio.sleep(2)
+        return True
+    except Exception as e:
+        print(f"   [Streamer] Failed to navigate to prev day: {e}")
+        return False
+
+
+def _get_earliest_live_score_date() -> date | None:
+    """Retrieve the earliest date from the live_scores table."""
+    conn = _get_conn()
+    rows = query_all(conn, 'live_scores')
+    if not rows:
+        return None
+
+    earliest = None
+    for row in rows:
+        d = row.get('date', '') or ''
+        # Try DD.MM.YYYY format
+        m = re.match(r'^(\d{2})\.(\d{2})\.(\d{4})$', d)
+        if m:
+            d = f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+        try:
+            parsed = date.fromisoformat(d)
+            if earliest is None or parsed < earliest:
+                earliest = parsed
+        except ValueError:
+            continue
+    return earliest
+
+
+async def _catch_up_from_live_stream(page: Page, sync: SyncManager):
+    """
+    Catch-up logic on startup/restart.
+    Checks live_scores for unresolved matches, then navigates day-by-day
+    from the earliest date to today, extracting and propagating each day.
+    """
+    earliest = _get_earliest_live_score_date()
+    today = date.today()
+
+    if earliest is None:
+        print("   [Streamer] No pending live_scores — skipping catch-up.")
+        return
+
+    days_behind = (today - earliest).days
+    if days_behind <= 0:
+        print("   [Streamer] live_scores are current — no catch-up needed.")
+        return
+
+    print(f"   [Streamer] ⚡ Catch-up needed: {days_behind} day(s) behind (earliest: {earliest}).")
+    log_audit_event("STREAMER_CATCHUP_START", f"Catching up {days_behind} days from {earliest}.")
+
+    # If >7 days behind, fall back to enrich-leagues --refresh + predictions
+    if days_behind > 7:
+        print(f"   [Streamer] Gap > 7 days — falling back to --enrich-leagues --refresh.")
+        log_audit_event("STREAMER_CATCHUP_REFRESH", f"Gap {days_behind}d > 7d, using refresh fallback.")
+        try:
+            leo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'Leo.py')
+            subprocess.run(
+                [sys.executable, leo_path, '--enrich-leagues', '--refresh'],
+                cwd=os.path.dirname(leo_path), timeout=3600
+            )
+            subprocess.run(
+                [sys.executable, leo_path, '--predictions'],
+                cwd=os.path.dirname(leo_path), timeout=1800
+            )
+        except Exception as e:
+            print(f"   [Streamer] Refresh fallback error: {e}")
+
+        # Clear stale live_scores
+        conn = _get_conn()
+        conn.execute("DELETE FROM live_scores")
+        conn.commit()
+        print("   [Streamer] Cleared stale live_scores after refresh fallback.")
+        return
+
+    # ≤7 days: Navigate day-by-day from earliest to today
+    # First, go back to the earliest date
+    print(f"   [Streamer] Navigating back {days_behind} day(s) to {earliest}...")
+    for _ in range(days_behind):
+        if not await _navigate_to_prev_day(page):
+            print("   [Streamer] Could not navigate backward. Aborting catch-up.")
+            return
+
+    # Now extract day-by-day forward
+    for day_offset in range(days_behind + 1):  # Include today
+        current_date = earliest + timedelta(days=day_offset)
+        is_today = (current_date == today)
+        print(f"   [Streamer] Catch-up day {day_offset+1}/{days_behind+1}: {current_date}")
+
+        await _click_all_tab(page)
+        await ensure_content_expanded(page)
+        all_matches = await extract_all_matches(page, label="CatchUp")
+
+        LIVE_STATUSES = {'live', 'halftime', 'break', 'penalties', 'extra_time'}
+        RESOLVED_STATUSES = {'finished', 'cancelled', 'postponed', 'fro', 'abandoned'}
+
+        live = [m for m in all_matches if m.get('status') in LIVE_STATUSES]
+        resolved = [m for m in all_matches if m.get('status') in RESOLVED_STATUSES]
+
+        if live or resolved:
+            sched_upd, pred_upd = _propagate_status_updates(live, resolved)
+            print(f"   [Streamer] Catch-up {current_date}: {len(live)} live, {len(resolved)} resolved → {len(sched_upd)} fixtures, {len(pred_upd)} predictions.")
+
+            # Push to Supabase
+            if sync.supabase:
+                if pred_upd:
+                    await sync.batch_upsert('predictions', pred_upd)
+                if sched_upd:
+                    await sync.batch_upsert('schedules', sched_upd)
+        else:
+            print(f"   [Streamer] Catch-up {current_date}: 0 matches (off-day or no data).")
+
+        # Navigate to next day (unless we're already on today)
+        if not is_today:
+            await _navigate_to_next_day(page)
+
+    # Overwrite live_scores with only current live matches
+    conn = _get_conn()
+    conn.execute("DELETE FROM live_scores")
+    conn.commit()
+    print("   [Streamer] Cleared old live_scores. Current live data will populate on first cycle.")
+
+    # Review any pending predictions that can now be resolved
+    backlog = _review_pending_backlog()
+    if backlog and sync.supabase:
+        await sync.batch_upsert('predictions', backlog)
+
+    log_audit_event("STREAMER_CATCHUP_DONE", f"Catch-up complete. Processed {days_behind+1} days.")
+    print(f"   [Streamer] ✓ Catch-up complete. Resuming normal streaming.")
+
+
 @AIGOSuite.aigo_retry(max_retries=2, delay=30.0, use_aigo=False)
 async def live_score_streamer(playwright: Playwright, user_data_dir: str = None):
     """
@@ -323,8 +490,8 @@ async def live_score_streamer(playwright: Playwright, user_data_dir: str = None)
     - SQLite persistence + Supabase sync.
     - Recycles browser every 3 cycles.
     """
-    print(f"\n   [Streamer] Mobile Live Score Streamer v3.2 starting (Headless, 60s, isolation={'ON' if user_data_dir else 'OFF'})...")
-    log_audit_event("STREAMER_START", f"Mobile live score streamer v3.2 initialized (Isolation: {bool(user_data_dir)}).")
+    print(f"\n   [Streamer] Mobile Live Score Streamer v3.3 starting (Headless, 60s, isolation={'ON' if user_data_dir else 'OFF'})...")
+    log_audit_event("STREAMER_START", f"Mobile live score streamer v3.3 initialized (Isolation: {bool(user_data_dir)}).")
 
     global _last_push_sig
     RECYCLE_INTERVAL = 3
@@ -366,6 +533,13 @@ async def live_score_streamer(playwright: Playwright, user_data_dir: str = None)
             await fs_universal_popup_dismissal(page, "fs_home_page")
             await _click_all_tab(page)
             await ensure_content_expanded(page)
+
+            # ── Catch-up on first cycle of this session ──
+            if cycle == 0:
+                try:
+                    await _catch_up_from_live_stream(page, sync)
+                except Exception as e:
+                    print(f"   [Streamer] Catch-up error (non-fatal): {e}")
 
             session_cycle = 0
             while session_cycle < RECYCLE_INTERVAL:

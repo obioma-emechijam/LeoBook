@@ -260,7 +260,7 @@ def save_schedule_batch(entries: List[Dict[str, Any]]):
 
 def get_all_schedules() -> List[Dict[str, Any]]:
     """Loads all match schedules."""
-    return query_all(_get_conn(), 'fixtures')
+    return query_all(_get_conn(), 'schedules')
 
 
 # ─── Live Scores ───
@@ -377,7 +377,6 @@ def save_team_entry(team_info: Dict[str, Any]):
         'league_ids': [merged_league_ids] if merged_league_ids else [],
         'crest': _standardize_url(team_info.get('team_crest', '')),
         'url': _standardize_url(team_info.get('team_url', '')),
-        'country': team_info.get('country'),
         'city': team_info.get('city'),
         'stadium': team_info.get('stadium'),
         'other_names': team_info.get('other_names'),
@@ -403,6 +402,31 @@ def get_team_crest(team_id: str, team_name: str = "") -> str:
             return row['crest']
 
     return ""
+
+
+def propagate_crest_urls():
+    """Propagates Supabase crest URLs from teams into schedules.
+    Call after enrichment to ensure home_crest/away_crest in schedules
+    point to Supabase-hosted URLs (not local file paths).
+    """
+    conn = _get_conn()
+    h = conn.execute("""
+        UPDATE schedules SET home_crest = (
+            SELECT t.crest FROM teams t
+            WHERE t.team_id = schedules.home_team_id AND t.crest LIKE 'http%'
+        ) WHERE home_team_id IN (SELECT team_id FROM teams WHERE crest LIKE 'http%')
+          AND (home_crest IS NULL OR home_crest NOT LIKE 'http%supabase%')
+    """).rowcount
+    a = conn.execute("""
+        UPDATE schedules SET away_crest = (
+            SELECT t.crest FROM teams t
+            WHERE t.team_id = schedules.away_team_id AND t.crest LIKE 'http%'
+        ) WHERE away_team_id IN (SELECT team_id FROM teams WHERE crest LIKE 'http%')
+          AND (away_crest IS NULL OR away_crest NOT LIKE 'http%supabase%')
+    """).rowcount
+    conn.commit()
+    if h + a > 0:
+        print(f"    [Crest] Propagated Supabase URLs: {h} home + {a} away")
 
 
 # ─── Football.com Registry ───
@@ -484,10 +508,16 @@ def update_site_match_status(site_match_id: str, status: str,
 # ─── Market Outcome Evaluator (pure function, no I/O) ───
 
 def evaluate_market_outcome(prediction: str, home_score: str, away_score: str,
-                            home_team: str = "", away_team: str = "") -> Optional[str]:
+                            home_team: str = "", away_team: str = "",
+                            match_status: str = "") -> Optional[str]:
     """
-    Unified First-Principles Outcome Evaluator (v4.0).
+    Unified First-Principles Outcome Evaluator (v5.0).
     Returns '1' (Correct), '0' (Incorrect), or '' (Unknown/Void).
+
+    Settlement is based on 90min + stoppage time (regulation FT) ONLY.
+    If match_status is 'aet'/'pen'/'after pen', the match was a DRAW at FT,
+    so any draw-component prediction (1X, X2, draw) wins immediately.
+
     Handles: 1X2, Double Chance, DNB, Over/Under, BTTS, Team Over/Under,
              Winner & BTTS, Clean Sheet, and team-specific predictions.
     """
@@ -502,6 +532,27 @@ def evaluate_market_outcome(prediction: str, home_score: str, away_score: str,
     p = (prediction or '').strip().lower()
     h_lower = (home_team or '').strip().lower()
     a_lower = (away_team or '').strip().lower()
+    status = (match_status or '').strip().lower()
+
+    # AET/Pen detection: match went beyond 90min = it was a DRAW at regulation FT.
+    # Standard bookmaker rules: Double Chance / draw predictions settled on 90min only.
+    is_regulation_draw = status in ('aet', 'pen', 'after pen', 'after extra time',
+                                    'after penalties', 'ap', 'finished aet',
+                                    'finished ap', 'finished pen')
+    if is_regulation_draw:
+        _draw_markets = ('draw', 'x', '1x', 'x2', 'home or draw', 'home_or_draw',
+                         'away or draw', 'away_or_draw', 'draw or away',
+                         'double chance 1x', 'double chance x2')
+        if p in _draw_markets or ' or draw' in p or 'draw or ' in p:
+            return '1'  # Draw at FT → any draw-component bet wins
+        # Pure win bets lose at regulation time (match was a draw)
+        if p in ('home win', 'home_win', '1', 'away win', 'away_win', '2'):
+            return '0'
+        if p.endswith(' to win') and 'btts' not in p:
+            return '0'
+        # DNB → void on draw
+        if '(dnb)' in p:
+            return ''
 
     def _team_matches(candidate: str, reference: str) -> bool:
         if not candidate or not reference:
@@ -532,7 +583,13 @@ def evaluate_market_outcome(prediction: str, home_score: str, away_score: str,
     if p in ("home win", "home_win", "1"): return '1' if h > a else '0'
     if p in ("away win", "away_win", "2"): return '1' if a > h else '0'
     if p in ("draw", "x"): return '1' if h == a else '0'
-    if p in ("home or away", "12", "double chance 12"): return '1' if h != a else '0'
+
+    # 1a. Double Chance — settled on 90min + stoppage time ONLY (regulation FT).
+    #     A draw at FT triggers a win for "home or draw" / "away or draw" regardless
+    #     of any extra time or penalties that may follow.
+    if p in ("home or away", "12", "1 2", "double chance 12"): return '1' if h != a else '0'
+    if p in ("1x", "home or draw", "home_or_draw", "double chance 1x"): return '1' if h >= a else '0'
+    if p in ("x2", "away or draw", "away_or_draw", "draw or away", "double chance x2"): return '1' if a >= h else '0'
 
     # 2. "Team to win"
     if p.endswith(" to win"):
@@ -540,9 +597,14 @@ def evaluate_market_outcome(prediction: str, home_score: str, away_score: str,
         if _is_home(team): return '1' if h > a else '0'
         if _is_away(team): return '1' if a > h else '0'
 
-    # 3. "Team or Draw" / Double Chance
+    # 3. "Team or Draw" / Double Chance (team-name based)
+    #    Settled on 90min regulation time FT score only.
     if " or draw" in p:
         team = p.replace(" or draw", "").strip()
+        if _is_home(team): return '1' if h >= a else '0'
+        if _is_away(team): return '1' if a >= h else '0'
+    if "draw or " in p:
+        team = p.replace("draw or ", "").strip()
         if _is_home(team): return '1' if h >= a else '0'
         if _is_away(team): return '1' if a >= h else '0'
 
@@ -623,7 +685,7 @@ def _read_csv(filepath: str) -> List[Dict[str, str]]:
     """Legacy: reads from SQLite instead of CSV."""
     table_map = {
         PREDICTIONS_CSV: 'predictions',
-        SCHEDULES_CSV: 'fixtures',
+        SCHEDULES_CSV: 'schedules',
         STANDINGS_CSV: 'standings',
         TEAMS_CSV: 'teams',
         REGION_LEAGUE_CSV: 'leagues',

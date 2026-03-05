@@ -932,7 +932,7 @@ async def enrich_all_schedules(limit: Optional[int] = None, dry_run: bool = Fals
                             await sync_manager.batch_upsert('teams', sync_buffer_teams)
                             sync_buffer_teams = []
                         if sync_buffer_leagues:
-                            await sync_manager.batch_upsert('region_league', sync_buffer_leagues)
+                            await sync_manager.batch_upsert('leagues', sync_buffer_leagues)
                             sync_buffer_leagues = []
                         if sync_buffer_standings:
                             await sync_manager.batch_upsert('standings', sync_buffer_standings)
@@ -948,7 +948,7 @@ async def enrich_all_schedules(limit: Optional[int] = None, dry_run: bool = Fals
                 # Ensure all buffers are flushed first (redundant but safe)
                 if sync_buffer_schedules: await sync_manager.batch_upsert('schedules', sync_buffer_schedules)
                 if sync_buffer_teams: await sync_manager.batch_upsert('teams', sync_buffer_teams)
-                if sync_buffer_leagues: await sync_manager.batch_upsert('region_league', sync_buffer_leagues)
+                if sync_buffer_leagues: await sync_manager.batch_upsert('leagues', sync_buffer_leagues)
                 if sync_buffer_standings: await sync_manager.batch_upsert('standings', sync_buffer_standings)
                 
                 # Perform global sync with verification and retries

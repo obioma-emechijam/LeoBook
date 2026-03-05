@@ -115,7 +115,7 @@ async def extract_matches_from_page(page: Page) -> list:
             print(f"    [Cloud] Synchronizing metadata to Supabase...")
             await sync.batch_upsert('schedules', schedule_rows)
             await sync.batch_upsert('teams', team_rows)
-            await sync.batch_upsert('region_league', rl_rows)
+            await sync.batch_upsert('leagues', rl_rows)
             print(f"    [SUCCESS] Multi-table synchronization complete.")
 
     return matches

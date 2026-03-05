@@ -70,7 +70,7 @@ _SCHEMA_SQL = """
         last_updated        TEXT DEFAULT (datetime('now'))
     );
 
-    CREATE TABLE IF NOT EXISTS fixtures (
+    CREATE TABLE IF NOT EXISTS schedules (
         id                  INTEGER PRIMARY KEY AUTOINCREMENT,
         fixture_id          TEXT UNIQUE,
         date                TEXT,
@@ -138,7 +138,7 @@ _SCHEMA_SQL = """
         last_updated        TEXT DEFAULT (datetime('now'))
     );
 
-    -- standings: REMOVED in v7.0 — computed on-the-fly from fixtures table.
+    -- standings: REMOVED in v7.0 — computed on-the-fly from schedules table.
     -- See computed_standings() function and Supabase computed_standings VIEW.
 
     CREATE TABLE IF NOT EXISTS audit_log (
@@ -244,9 +244,9 @@ _SCHEMA_SQL = """
     );
 
     -- Indexes for hot-path queries (only on columns that exist at CREATE time)
-    CREATE INDEX IF NOT EXISTS idx_fixtures_league ON fixtures(league_id);
-    CREATE INDEX IF NOT EXISTS idx_fixtures_date ON fixtures(date);
-    CREATE INDEX IF NOT EXISTS idx_fixtures_fixture_id ON fixtures(fixture_id);
+    CREATE INDEX IF NOT EXISTS idx_schedules_league ON schedules(league_id);
+    CREATE INDEX IF NOT EXISTS idx_schedules_date ON schedules(date);
+    CREATE INDEX IF NOT EXISTS idx_schedules_fixture_id ON schedules(fixture_id);
     CREATE INDEX IF NOT EXISTS idx_leagues_league_id ON leagues(league_id);
     CREATE INDEX IF NOT EXISTS idx_predictions_date ON predictions(date);
     CREATE INDEX IF NOT EXISTS idx_predictions_status ON predictions(status);
@@ -264,21 +264,20 @@ _ALTER_MIGRATIONS = [
     ("leagues", "date_updated", "TEXT"),
     ("leagues", "fs_league_id", "TEXT"),
     ("teams", "team_id", "TEXT"),
-    ("teams", "country", "TEXT"),
     ("teams", "city", "TEXT"),
     ("teams", "stadium", "TEXT"),
     ("teams", "other_names", "TEXT"),
     ("teams", "abbreviations", "TEXT"),
     ("teams", "search_terms", "TEXT"),
     ("teams", "hq_crest", "INTEGER DEFAULT 0"),
-    ("fixtures", "region_league", "TEXT"),
-    ("fixtures", "match_link", "TEXT"),
+    ("schedules", "region_league", "TEXT"),
+    ("schedules", "match_link", "TEXT"),
 ]
 
 # CSV file → SQLite table mapping for auto-import.
 # Key: csv filename, Value: (table_name, primary_key_column, column_rename_map)
 _CSV_TABLE_MAP = {
-    "schedules.csv": ("fixtures", "fixture_id", {
+    "schedules.csv": ("schedules", "fixture_id", {
         "match_time": "time",
         "match_link": "url",
         "home_team": "home_team_name",
@@ -322,7 +321,7 @@ _COMPUTED_STANDINGS_SQL = """
             CASE WHEN home_score < away_score THEN 1 ELSE 0 END AS losses,
             home_score AS goals_for,
             away_score AS goals_against
-        FROM fixtures
+        FROM schedules
         WHERE match_status = 'finished'
           AND home_score IS NOT NULL AND away_score IS NOT NULL
           AND TYPEOF(home_score) != 'text' OR CAST(home_score AS INTEGER) = home_score
@@ -340,7 +339,7 @@ _COMPUTED_STANDINGS_SQL = """
             CASE WHEN away_score < home_score THEN 1 ELSE 0 END,
             away_score,
             home_score
-        FROM fixtures
+        FROM schedules
         WHERE match_status = 'finished'
           AND home_score IS NOT NULL AND away_score IS NOT NULL
           AND TYPEOF(home_score) != 'text' OR CAST(home_score AS INTEGER) = home_score
@@ -363,7 +362,7 @@ _COMPUTED_STANDINGS_SQL = """
 
 
 def computed_standings(conn=None, league_id=None, season=None):
-    """Compute league standings on-the-fly from the fixtures table.
+    """Compute league standings on-the-fly from the schedules table.
 
     Always up-to-date, even during live matches (if scores are propagated).
     Replaces the old standings table (removed in v7.0).
@@ -816,7 +815,7 @@ def upsert_fixture(conn: sqlite3.Connection, data: Dict[str, Any]) -> int:
     fixture_id = data.get("fixture_id", "")
 
     cur = conn.execute(
-        """INSERT INTO fixtures (
+        """INSERT INTO schedules (
                fixture_id, date, time, league_id,
                home_team_id, home_team_name, away_team_id, away_team_name,
                home_score, away_score, extra, league_stage,
@@ -830,16 +829,16 @@ def upsert_fixture(conn: sqlite3.Connection, data: Dict[str, Any]) -> int:
                :region_league, :match_link, :last_updated
            )
            ON CONFLICT(fixture_id) DO UPDATE SET
-               date           = COALESCE(excluded.date, fixtures.date),
-               time           = COALESCE(excluded.time, fixtures.time),
-               home_score     = COALESCE(excluded.home_score, fixtures.home_score),
-               away_score     = COALESCE(excluded.away_score, fixtures.away_score),
-               extra          = COALESCE(excluded.extra, fixtures.extra),
-               match_status   = COALESCE(excluded.match_status, fixtures.match_status),
-               home_crest     = COALESCE(excluded.home_crest, fixtures.home_crest),
-               away_crest     = COALESCE(excluded.away_crest, fixtures.away_crest),
-               region_league  = COALESCE(excluded.region_league, fixtures.region_league),
-               match_link     = COALESCE(excluded.match_link, fixtures.match_link),
+               date           = COALESCE(excluded.date, schedules.date),
+               time           = COALESCE(excluded.time, schedules.time),
+               home_score     = COALESCE(excluded.home_score, schedules.home_score),
+               away_score     = COALESCE(excluded.away_score, schedules.away_score),
+               extra          = COALESCE(excluded.extra, schedules.extra),
+               match_status   = COALESCE(excluded.match_status, schedules.match_status),
+               home_crest     = COALESCE(excluded.home_crest, schedules.home_crest),
+               away_crest     = COALESCE(excluded.away_crest, schedules.away_crest),
+               region_league  = COALESCE(excluded.region_league, schedules.region_league),
+               match_link     = COALESCE(excluded.match_link, schedules.match_link),
                last_updated   = excluded.last_updated
         """,
         {
@@ -887,7 +886,7 @@ def bulk_upsert_fixtures(conn: sqlite3.Connection, fixtures: List[Dict[str, Any]
             f.get("url"), f.get("region_league"), f.get("match_link"), now,
         ))
     conn.executemany(
-        """INSERT INTO fixtures (
+        """INSERT INTO schedules (
                fixture_id, date, time, league_id,
                home_team_id, home_team_name, away_team_id, away_team_name,
                home_score, away_score, extra, league_stage,
@@ -895,22 +894,22 @@ def bulk_upsert_fixtures(conn: sqlite3.Connection, fixtures: List[Dict[str, Any]
                region_league, match_link, last_updated
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(fixture_id) DO UPDATE SET
-               date           = COALESCE(excluded.date, fixtures.date),
-               time           = COALESCE(excluded.time, fixtures.time),
-               league_id      = COALESCE(excluded.league_id, fixtures.league_id),
-               home_team_id   = COALESCE(excluded.home_team_id, fixtures.home_team_id),
-               away_team_id   = COALESCE(excluded.away_team_id, fixtures.away_team_id),
-               home_score     = COALESCE(excluded.home_score, fixtures.home_score),
-               away_score     = COALESCE(excluded.away_score, fixtures.away_score),
-               extra          = COALESCE(excluded.extra, fixtures.extra),
-               league_stage   = COALESCE(excluded.league_stage, fixtures.league_stage),
-               match_status   = COALESCE(excluded.match_status, fixtures.match_status),
-               season         = COALESCE(excluded.season, fixtures.season),
-               home_crest     = COALESCE(excluded.home_crest, fixtures.home_crest),
-               away_crest     = COALESCE(excluded.away_crest, fixtures.away_crest),
-               url            = COALESCE(excluded.url, fixtures.url),
-               region_league  = COALESCE(excluded.region_league, fixtures.region_league),
-               match_link     = COALESCE(excluded.match_link, fixtures.match_link),
+               date           = COALESCE(excluded.date, schedules.date),
+               time           = COALESCE(excluded.time, schedules.time),
+               league_id      = COALESCE(excluded.league_id, schedules.league_id),
+               home_team_id   = COALESCE(excluded.home_team_id, schedules.home_team_id),
+               away_team_id   = COALESCE(excluded.away_team_id, schedules.away_team_id),
+               home_score     = COALESCE(excluded.home_score, schedules.home_score),
+               away_score     = COALESCE(excluded.away_score, schedules.away_score),
+               extra          = COALESCE(excluded.extra, schedules.extra),
+               league_stage   = COALESCE(excluded.league_stage, schedules.league_stage),
+               match_status   = COALESCE(excluded.match_status, schedules.match_status),
+               season         = COALESCE(excluded.season, schedules.season),
+               home_crest     = COALESCE(excluded.home_crest, schedules.home_crest),
+               away_crest     = COALESCE(excluded.away_crest, schedules.away_crest),
+               url            = COALESCE(excluded.url, schedules.url),
+               region_league  = COALESCE(excluded.region_league, schedules.region_league),
+               match_link     = COALESCE(excluded.match_link, schedules.match_link),
                last_updated   = excluded.last_updated
         """,
         rows,

@@ -53,7 +53,7 @@ from Core.Utils.constants import NAVIGATION_TIMEOUT
 def _load_schedule_db() -> Dict[str, Dict]:
     """Loads fixtures from SQLite into a dict for quick lookups."""
     conn = _get_conn()
-    rows = query_all(conn, 'fixtures')
+    rows = query_all(conn, 'schedules')
     return {r['fixture_id']: r for r in rows if r.get('fixture_id')}
 
 
@@ -155,11 +155,17 @@ def save_single_outcome(match_data: Dict, new_status: str):
                 home_team = row['home_team']
                 away_team = row['away_team']
                 actual_score = updates.get('actual_score', '')
+                # Get match_status from schedule for AET/Pen detection
+                sched = conn.execute(
+                    "SELECT match_status FROM schedules WHERE fixture_id = ?", (target_id,)
+                ).fetchone()
+                match_status = (sched['match_status'] if sched else '') or match_data.get('match_status', '') or new_status
 
                 score_match = re.match(r'(\d+)\s*-\s*(\d+)', actual_score or '')
                 if score_match:
                     h_core, a_core = score_match.group(1), score_match.group(2)
-                    res = evaluate_market_outcome(prediction, h_core, a_core, home_team, away_team)
+                    res = evaluate_market_outcome(prediction, h_core, a_core, home_team, away_team,
+                                                  match_status=match_status)
                     updates['outcome_correct'] = res if res else '0'
 
                     # Immediate cloud sync
@@ -184,7 +190,7 @@ def save_single_outcome(match_data: Dict, new_status: str):
 def sync_schedules_to_predictions():
     """Ensures all entries in fixtures exist in predictions."""
     conn = _get_conn()
-    schedules = query_all(conn, 'fixtures')
+    schedules = query_all(conn, 'schedules')
     pred_ids = {r['fixture_id'] for r in query_all(conn, 'predictions') if r.get('fixture_id')}
 
     added_count = 0

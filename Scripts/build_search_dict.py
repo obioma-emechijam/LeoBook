@@ -367,7 +367,7 @@ async def main():
     teams_raw = defaultdict(lambda: {"id": None, "names": set()})
 
     print(f"Reading fixtures from SQLite and collecting unique teams/leagues...")
-    fixtures = query_all(conn, 'fixtures')
+    fixtures = query_all(conn, 'schedules')
     if not fixtures:
         print("Error: No fixtures found in database.")
         return
@@ -463,7 +463,7 @@ async def main():
 
             if updates:
                 print(f"  [Supabase] Upserting {len(updates)} leagues...")
-                batch_upsert("region_league", list(updates.values()))
+                batch_upsert("leagues", list(updates.values()))
                 update_db_under_lock(updates, "league_id", "league")
             await asyncio.sleep(SLEEP_BETWEEN_BATCHES)
 
@@ -625,7 +625,7 @@ async def enrich_match_search_dict(
                 updates[league_id] = upsert_data
 
             if updates:
-                batch_upsert("region_league", list(updates.values()))
+                batch_upsert("leagues", list(updates.values()))
                 update_db_under_lock(updates, "league_id", "league")
                 print(f"    [SearchDict] League '{league_name}' enriched")
         except Exception as e:

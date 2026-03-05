@@ -413,9 +413,13 @@ class MatchModel {
     return MatchModel(
       fixtureId: fixtureId,
       date: formattedDate,
-      time: _clean(row['match_time']?.toString() ?? ''),
-      homeTeam: _clean(row['home_team']?.toString() ?? ''),
-      awayTeam: _clean(row['away_team']?.toString() ?? ''),
+      // Predictions: match_time | Fixtures: time
+      time: _clean((row['match_time'] ?? row['time'])?.toString() ?? ''),
+      // Predictions: home_team | Fixtures: home_team_name
+      homeTeam:
+          _clean((row['home_team'] ?? row['home_team_name'])?.toString() ?? ''),
+      awayTeam:
+          _clean((row['away_team'] ?? row['away_team_name'])?.toString() ?? ''),
       homeTeamId: row['home_team_id']?.toString(),
       awayTeamId: row['away_team_id']?.toString(),
       homeScore: hScore,
@@ -429,8 +433,9 @@ class MatchModel {
       marketReliability: marketReliability,
       liveMinute: (row['minute'] ?? row['live_minute'])?.toString(),
       isFeatured: isFeatured,
-      homeCrestUrl: row['home_crest_url']?.toString(),
-      awayCrestUrl: row['away_crest_url']?.toString(),
+      // Predictions: home_crest_url | Fixtures: home_crest
+      homeCrestUrl: (row['home_crest_url'] ?? row['home_crest'])?.toString(),
+      awayCrestUrl: (row['away_crest_url'] ?? row['away_crest'])?.toString(),
       regionFlagUrl: row['region_flag_url']?.toString(),
       leagueCrestUrl: row['league_crest_url']?.toString(),
       xgHome: xgHome,

@@ -1081,16 +1081,11 @@ async def main(limit: Optional[int] = None, offset: int = 0, reset: bool = False
         else:
             mode_label = f"season offset #{target_season} only"
     # ── Workload announcement ─────────────────────────────────────────────
-    print(f"\n  [Enrich] {total} leagues to process ({scan_mode}, {mode_label}, concurrency={MAX_CONCURRENCY})")
-    print(f"  [Workload] Leagues #{offset + 1} to #{offset + total}:")
-    for wi, wl in enumerate(leagues[:20], 1):
-        print(f"    {wi:>4}. {wl.get('name', '?')} ({wl.get('league_id', '?')})")
-    if total > 20:
-        print(f"    ... and {total - 20} more")
-
-    # Calculate 20% sync checkpoints
     sync_interval = max(1, total // 5)  # 20% of total
     sync_checkpoints = set(range(sync_interval, total + 1, sync_interval))
+    print(f"\n  [Enrich] {total} leagues to process ({scan_mode}, {mode_label}, concurrency={MAX_CONCURRENCY})")
+    print(f"  [Sync]   Cloud sync every {sync_interval} leagues (20% checkpoints at: {sorted(sync_checkpoints)})")
+    print(f"  [Workload] Leagues #{offset + 1} to #{offset + total}:")
 
     # ── Ensure crest directories exist (from project root) ───────────────
     os.makedirs(os.path.join(BASE_DIR, LEAGUE_CRESTS_DIR), exist_ok=True)
@@ -1099,7 +1094,7 @@ async def main(limit: Optional[int] = None, offset: int = 0, reset: bool = False
     # ── Optional: import SyncManager for checkpoints ─────────────────────
     sync_mgr = None
     try:
-        from Data.Access.sync_manager import SyncManager
+        from Data.Access.sync_manager import SyncManager, TABLE_CONFIG
         sync_mgr = SyncManager()
     except Exception:
         pass  # SyncManager not available (standalone mode or no Supabase)
@@ -1135,13 +1130,16 @@ async def main(limit: Optional[int] = None, offset: int = 0, reset: bool = False
                 if completed_count in sync_checkpoints:
                     pct = int((completed_count / total) * 100)
                     print(f"\n  [Checkpoint] {pct}% complete ({completed_count}/{total})")
-                    if sync_mgr:
+                    if sync_mgr and sync_mgr.supabase:
                         try:
                             print(f"  [Sync] Running cloud sync at {pct}%...")
-                            await sync_mgr.push_to_cloud()
-                            print(f"  [Sync] Cloud sync complete")
+                            for tkey in ('schedules', 'teams', 'leagues'):
+                                cfg = TABLE_CONFIG.get(tkey)
+                                if cfg:
+                                    await sync_mgr._sync_table(tkey, cfg)
+                            print(f"  [Sync] Cloud sync at {pct}% complete")
                         except Exception as e:
-                            print(f"  [Sync] Cloud sync failed: {e}")
+                            print(f"  [Sync] Cloud sync at {pct}% failed: {e}")
 
         tasks = [_worker(lg, i) for i, lg in enumerate(leagues, 1)]
         await asyncio.gather(*tasks)
@@ -1151,7 +1149,7 @@ async def main(limit: Optional[int] = None, offset: int = 0, reset: bool = False
 
     # ── Final summary ────────────────────────────────────────────────────
     league_count = conn.execute("SELECT COUNT(*) FROM leagues").fetchone()[0]
-    fixture_count = conn.execute("SELECT COUNT(*) FROM fixtures").fetchone()[0]
+    fixture_count = conn.execute("SELECT COUNT(*) FROM schedules").fetchone()[0]
     team_count = conn.execute("SELECT COUNT(*) FROM teams").fetchone()[0]
     processed = conn.execute("SELECT COUNT(*) FROM leagues WHERE processed = 1").fetchone()[0]
     gaps = conn.execute(
@@ -1160,6 +1158,10 @@ async def main(limit: Optional[int] = None, offset: int = 0, reset: bool = False
                 OR region IS NULL OR region = '' OR crest IS NULL OR crest = ''
                 OR current_season IS NULL OR current_season = '')"""
     ).fetchone()[0]
+
+    # Auto-propagate Supabase crest URLs from teams into schedules
+    from Data.Access.db_helpers import propagate_crest_urls
+    propagate_crest_urls()
 
     print(f"\n{'='*60}")
     print(f"  SCRAPING COMPLETE")
