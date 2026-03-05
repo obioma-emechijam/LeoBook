@@ -164,7 +164,9 @@ Examples:
 
     # --- Utility Commands ---
     parser.add_argument('--sync', action='store_true',
-                       help='Force a full cloud sync (bi-directional)')
+                       help='Force push-only sync (local → Supabase)')
+    parser.add_argument('--pull', action='store_true',
+                       help='Pull ALL data from Supabase → local SQLite (bootstrap/recovery)')
     parser.add_argument('--recommend', action='store_true',
                        help='Generate and display recommendations only')
     parser.add_argument('--accuracy', action='store_true',

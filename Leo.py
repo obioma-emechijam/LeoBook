@@ -90,23 +90,32 @@ LOCK_FILE = "leo.lock"
 # ============================================================
 
 async def run_startup_sync():
-    """Startup: Ensure local DB and Supabase tables exist, then full bi-directional sync.
-    Must complete before the live streamer starts."""
-    log_state(chapter="Startup", action="DB Initialization & Full Sync")
+    """Startup: Ensure local DB exists, then push-only sync.
+    Auto-bootstraps from Supabase if local DB is missing or empty."""
+    log_state(chapter="Startup", action="DB Initialization & Push-Only Sync")
     try:
         print("\n" + "=" * 60)
-        print("  STARTUP: Database Initialization & Full Sync")
+        print("  STARTUP: Database Initialization & Push-Only Sync")
         print("=" * 60)
 
         # Initialize local SQLite DB (creates tables if missing)
         init_csvs()
-        init_db()
+        conn = init_db()
 
-        # Full bi-directional sync (auto-creates Supabase tables if missing)
+        # Check if DB is effectively empty (auto-bootstrap detection)
+        try:
+            sched_count = conn.execute("SELECT COUNT(*) FROM schedules").fetchone()[0]
+        except Exception:
+            sched_count = 0
+
+        if sched_count == 0:
+            print("     [!] Local DB empty — will bootstrap from Supabase automatically")
+
+        # Push-only sync (bootstraps empty tables from Supabase)
         sync_mgr = SyncManager()
         await sync_mgr.sync_on_startup()
 
-        log_audit_event("STARTUP", "DB initialized and full sync completed.", status="success")
+        log_audit_event("STARTUP", "DB initialized and push-only sync completed.", status="success")
         print("  [Startup] ✓ Complete")
         return True
     except Exception as e:
@@ -403,9 +412,27 @@ async def run_utility(args):
     init_csvs()
 
     if args.sync:
-        print("\n  --- LEO: Force Full Cloud Sync ---")
+        print("\n  --- LEO: Force Push-Only Sync ---")
         await run_full_sync(session_name="Manual Sync")
         print("  [SUCCESS] Sync complete.")
+
+    elif getattr(args, 'pull', False):
+        print("\n  --- LEO: Pull ALL from Supabase → local SQLite ---")
+        init_db()
+        sync_mgr = SyncManager()
+        from Data.Access.sync_manager import TABLE_CONFIG
+        total = 0
+        for table_key, config in TABLE_CONFIG.items():
+            local_table = config['local_table']
+            remote_table = config['remote_table']
+            key_field = config['key']
+            print(f"   Pulling {remote_table}...")
+            pulled = await sync_mgr._bootstrap_from_remote(local_table, remote_table, key_field)
+            if pulled > 0:
+                sync_mgr._set_watermark(remote_table, dt.now().isoformat())
+            total += pulled
+            print(f"   [{remote_table}] ✓ {pulled} rows")
+        print(f"\n  [SUCCESS] Total pulled: {total} rows")
 
     elif args.recommend:
         print("\n  --- LEO: Generate Recommendations ---")
@@ -698,7 +725,8 @@ if __name__ == "__main__":
     log_file, original_stdout, original_stderr = setup_terminal_logging(args)
 
     # Determine which mode to run
-    is_utility = any([args.sync, args.recommend, args.accuracy,
+    is_utility = any([args.sync, getattr(args, 'pull', False),
+                      args.recommend, args.accuracy,
                       args.search_dict, args.review,
                       args.rule_engine, args.streamer,
                       args.assets,
