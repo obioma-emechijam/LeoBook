@@ -232,7 +232,7 @@ class SyncManager:
             logger.warning(f"    [!] Table '{remote_table}' still missing after auto-create attempt.")
             return False
 
-    async def sync_on_startup(self, force_full: bool = False) -> None:
+    async def sync_on_startup(self, force_full: bool = True) -> None:
         if not self.supabase:
             return
         logger.info("Starting push-only sync on startup...")
