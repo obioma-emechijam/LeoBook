@@ -430,6 +430,7 @@ class RLTrainer:
         for day_idx, match_date in enumerate(all_dates):
             day_matches = 0
             day_reward = 0.0
+            day_imit_loss = 0.0
             day_kl = 0.0
             day_rl_acc = 0.0
             day_rule_acc = 0.0
@@ -473,6 +474,7 @@ class RLTrainer:
 
                 day_matches += 1
                 day_reward += metrics.get("reward", 0.0)
+                day_imit_loss += metrics.get("imitation_loss", 0.0)
                 day_kl += metrics.get("kl_div", 0.0)
 
                 # Gradient norm tracking
@@ -509,9 +511,13 @@ class RLTrainer:
                 rl_acc = (day_rl_acc / day_matches) * 100
                 rule_acc = (day_rule_acc / day_matches) * 100
                 kl = day_kl / day_matches
-                rw = day_reward / day_matches
                 gn = day_grad_norm / day_matches
-                print(f"  [Day {day_idx+1:2d}/{len(all_dates)}] Rule Acc: {rule_acc:4.1f}% | RL Acc: {rl_acc:4.1f}% | KL: {kl:5.3f} | Reward: {rw:6.3f} | GradNorm: {gn:.4f} | Matches: {day_matches}")
+                if phase == 1 and not cold:
+                    il = day_imit_loss / day_matches
+                    print(f"  [Day {day_idx+1:2d}/{len(all_dates)}] Rule Acc: {rule_acc:4.1f}% | RL Acc: {rl_acc:4.1f}% | KL: {kl:5.3f} | ImitLoss: {il:6.4f} | GradNorm: {gn:.4f} | Matches: {day_matches}")
+                else:
+                    rw = day_reward / day_matches
+                    print(f"  [Day {day_idx+1:2d}/{len(all_dates)}] Rule Acc: {rule_acc:4.1f}% | RL Acc: {rl_acc:4.1f}% | KL: {kl:5.3f} | Reward: {rw:6.3f} | GradNorm: {gn:.4f} | Matches: {day_matches}")
 
         # Restore LR after Phase 1  
         if original_lrs:
