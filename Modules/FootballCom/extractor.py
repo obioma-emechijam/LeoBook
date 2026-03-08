@@ -20,7 +20,7 @@ from .navigator import hide_overlays
 from Core.Intelligence.aigo_suite import AIGOSuite
 
 
-async def _activate_and_wait_for_matches(page: Page, expected_count: int = 0) -> bool:
+async def _activate_and_wait_for_matches(page: Page) -> bool:
     """
     Triggers lazy-load hydration on football.com tournament pages
     by scrolling before waiting for match card selectors.
@@ -62,17 +62,6 @@ async def _activate_and_wait_for_matches(page: Page, expected_count: int = 0) ->
                 await asyncio.sleep(0.8)
     except Exception:
         pass
-
-    # Dynamic pre-scroll wait — scales with expected fixture count.
-    # More cards = more JS rendering time before DOM is stable.
-    # Formula: base 1.0s + 0.25s per expected fixture, capped at 5.0s
-    # Examples: 2 fixtures → 1.5s | 6 → 2.5s | 10 → 3.5s | 16+ → 5.0s
-    pre_scroll_wait = min(1.0 + (expected_count * 0.25), 5.0)
-    print(
-        f"    [Extractor] Waiting {pre_scroll_wait:.1f}s "
-        f"(expected {expected_count} fixture(s))..."
-    )
-    await asyncio.sleep(pre_scroll_wait)
 
     # Phase 2: Incremental scroll to trigger match card hydration
     try:
@@ -148,6 +137,17 @@ async def extract_league_matches(page: Page, target_date: str = None, target_lea
     if fb_url:
         print(f"    [Extractor] Navigating to {fb_url}...")
         await page.goto(fb_url, wait_until='domcontentloaded', timeout=30000)
+
+        # Dynamic post-navigation wait — scales with expected fixture count.
+        # More cards = more JS rendering time before DOM is stable.
+        # Placed here so the page hydrates BEFORE any Phase 0/1/2/3 checks.
+        # Formula: base 1.0s + 0.25s per expected fixture, capped at 5.0s
+        pre_hydration_wait = min(1.0 + (expected_count * 0.25), 5.0)
+        print(
+            f"    [Extractor] Waiting {pre_hydration_wait:.1f}s "
+            f"(expected {expected_count} fixture(s))..."
+        )
+        await asyncio.sleep(pre_hydration_wait)
     
     current_url = page.url
     print(f"  [Harvest] Sequence for {target_league_name or 'league'} -> {current_url}")
@@ -169,7 +169,7 @@ async def extract_league_matches(page: Page, target_date: str = None, target_lea
     if is_tournament_page:
         print(f"    [Mode] Direct Tournament Page")
         await dismiss_overlays(page)
-        content_ready = await _activate_and_wait_for_matches(page, expected_count=expected_count)
+        content_ready = await _activate_and_wait_for_matches(page)
         
         if not content_ready:
             return []
@@ -191,7 +191,7 @@ async def extract_league_matches(page: Page, target_date: str = None, target_lea
     else:
         print(f"    [Mode] Global Schedule Page")
         await dismiss_overlays(page)
-        content_ready = await _activate_and_wait_for_matches(page, expected_count=expected_count)
+        content_ready = await _activate_and_wait_for_matches(page)
         
         if not content_ready:
             return []
