@@ -124,7 +124,7 @@ class WalkForwardBacktester:
         # We override the internal training loop to limit date range
         trainer.train_from_fixtures(
             phase=1,
-            cold=False,       # Use imitation learning (Poisson expert)
+            cold=True,        # Each window starts from base weights
             limit_days=window_days,
             resume=False,
         )
