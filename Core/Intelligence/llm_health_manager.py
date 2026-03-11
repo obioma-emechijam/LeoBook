@@ -42,7 +42,7 @@ class LLMHealthManager:
     # gemini-2.5-flash-lite excluded — reserved for SearchDict
     MODELS_DESCENDING = [
         "gemini-2.5-pro",
-        "gemini-3-flash",           # FIX: was "gemini-3-flash-preview" (invalid model name)
+        "gemini-3-flash-preview",   # REVERT: "gemini-3-flash" is not found by the native SDK generateContent endpoint
         "gemini-2.5-flash",
         "gemini-2.0-flash",
     ]
@@ -53,7 +53,7 @@ class LLMHealthManager:
         "gemini-2.5-flash-lite",
         "gemini-2.0-flash",
         "gemini-2.5-flash",
-        "gemini-3-flash",           # FIX: was "gemini-3-flash-preview" (invalid model name)
+        "gemini-3-flash-preview",   # REVERT: "gemini-3-flash" is not found by the native SDK generateContent endpoint
     ]
     # Default model for health-check pings (cheapest)
     PING_MODEL = "gemini-3.1-flash-lite-preview"

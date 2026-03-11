@@ -9,6 +9,11 @@ import json
 import sqlite3
 import asyncio                          # FIX: moved to top-level (was inside _llm_resolve)
 from typing import List, Dict, Optional, Tuple, Set
+
+# Module-level set: tracks model names that returned 404 (not found by the API endpoint)
+# during this process lifetime. Any model added here is permanently skipped by _llm_resolve
+# for all subsequent escalations — no API call is wasted on a dead model string.
+_session_dead_models: Set[str] = set()
 from Levenshtein import distance, ratio
 
 # Try importing Google GenAI (New Package)
@@ -340,6 +345,9 @@ class GrokMatcher:
              on_gemini_403() which caused a silent AttributeError.
         FIX: Passes err_str to on_gemini_429() so daily-limit detection works.
         FIX: Skips models already marked daily-exhausted before attempting.
+        FIX: Tracks session-level 404 (model-not-found) errors. The first time a
+             model returns 404 it is added to _session_dead_models and logged.
+             All subsequent escalations skip it instantly with no API call wasted.
         """
         from Core.Intelligence.llm_health_manager import health_manager
         await health_manager.ensure_initialized()
@@ -360,13 +368,18 @@ class GrokMatcher:
         model_chain = health_manager.get_model_chain("aigo")
 
         for model_name in model_chain:
-            # FIX: skip models already daily-exhausted — avoids hammering a dead model
+            # Skip models already daily-exhausted
             if health_manager.is_model_daily_exhausted(model_name):
                 print(f"    [GrokMatcher] Skipping {model_name} — daily quota exhausted.")
                 continue
 
-            # FIX: rotate through ALL available keys per model, not just one.
-            # Mirrors the while-True pattern from build_search_dict.py.
+            # Skip models that returned 404 (not found) earlier this session.
+            # 404 is a permanent model-level error for this process lifetime;
+            # retrying it on every escalation only wastes round-trips.
+            if model_name in _session_dead_models:
+                continue
+
+            # Rotate through ALL available keys per model.
             while True:
                 api_key = health_manager.get_next_gemini_key(model=model_name)
                 if not api_key:
@@ -395,17 +408,20 @@ class GrokMatcher:
                 except Exception as e:
                     err_str = str(e)
                     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                        # FIX: pass err_str for daily-limit detection
                         health_manager.on_gemini_429(api_key, model=model_name, err_str=err_str)
                         if health_manager.is_model_daily_exhausted(model_name):
-                            # Daily limit hit — no point trying more keys for this model
                             break
                         # Per-minute throttle — try next key for same model
                         continue
+                    elif "404" in err_str or "NOT_FOUND" in err_str:
+                        # Model string is not recognised by this API endpoint.
+                        # Mark dead for the entire session so we never try it again.
+                        _session_dead_models.add(model_name)
+                        print(f"    [GrokMatcher] {model_name} not found — removed from session chain.")
+                        break  # No point trying other keys; model itself is unavailable
                     elif "403" in err_str:
                         # FIX: was on_gemini_403() which doesn't exist — caused AttributeError
                         health_manager.on_gemini_fatal_error(api_key, "403 Forbidden")
-                        # Key is gone; loop will get the next one
                         continue
                     elif "401" in err_str or "UNAUTHORIZED" in err_str:
                         health_manager.on_gemini_fatal_error(api_key, "401 Unauthorized")

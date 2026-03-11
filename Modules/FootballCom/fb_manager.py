@@ -196,14 +196,24 @@ async def _league_worker(
 ) -> List[Dict]:
     """
     Semaphore-bounded worker: one league → one page.
-    Opens fresh page, extracts all matches, fuzzy-matches
-    against fs_fixtures, saves each resolved match to SQLite
-    immediately, closes page.
-    Returns list of resolved match_row dicts.
+    EXTRACTION ONLY — opens a fresh page, extracts all matches from
+    football.com, pairs each FS fixture with its candidate fb matches,
+    then closes the page and returns the pairs.
+
+    Resolution (fuzzy + LLM) is intentionally NOT done here.
+    It runs in a dedicated sequential phase AFTER all leagues have
+    been extracted, so that:
+      - All browser pages are closed before any LLM quota is consumed.
+      - LLM health checks and resolver calls never interleave with
+        concurrent page extraction.
+
+    Returns: list of dicts, each with keys:
+        'fs_fix'      — original FS fixture dict
+        'candidates'  — list of fb match dicts from the page
+        'league_name' — for logging in the resolution phase
     """
     async with semaphore:
         page = None
-        resolved: List[Dict] = []
         try:
             page = await browser_context.new_page()
             await page.set_viewport_size({"width": 500, "height": 640})
@@ -225,6 +235,8 @@ async def _league_worker(
 
             all_page_matches = await validate_match_data(all_page_matches)
 
+            # Pair each FS fixture with its page candidates — no resolution yet.
+            extraction_pairs = []
             for fs_fix in fs_fixtures:
                 home = (fs_fix.get('home_team_name') or '').strip()
                 away = (fs_fix.get('away_team_name') or '').strip()
@@ -238,24 +250,13 @@ async def _league_worker(
                     if not fix_date or m.get('date', '') == fix_date
                 ] or all_page_matches
 
-                # Use the new Three-Layer Cascade Resolver
-                match_row, score, method = await matcher.resolve_with_cascade(
-                    fs_fix, candidates, conn
-                )
+                extraction_pairs.append({
+                    'fs_fix': fs_fix,
+                    'candidates': candidates,
+                    'league_name': league_name,
+                })
 
-                if match_row:
-                    # Enrich with FS team IDs for SearchDict batching
-                    match_row["home_id"] = fs_fix.get("home_team_id") or fs_fix.get("home_id")
-                    match_row["away_id"] = fs_fix.get("away_team_id") or fs_fix.get("away_id")
-                    match_row["resolution_method"] = method
-
-                    save_site_matches([match_row])  # immediate SQLite save
-                    resolved.append(match_row)
-                else:
-                    # We still want to track failures for the summary
-                    resolved.append({"status": "failed", "resolution_method": "failed"})
-
-            return resolved
+            return extraction_pairs
 
         except Exception as e:
             print(f"  [League] ERROR {league_name}: {e}")
@@ -398,12 +399,11 @@ async def run_odds_harvesting(playwright: Playwright):
 
             from playwright.async_api import Error as PlaywrightError
 
-            resolved_matches: List[Dict] = []
             resolved_count = 0
             unresolved_count = 0
 
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # 5. Concurrent league harvesting (semaphore-bounded)
+            # 5. Concurrent league harvesting (extraction only)
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             league_sem = asyncio.Semaphore(MAX_CONCURRENCY)
             unmapped_count = 0
@@ -431,19 +431,55 @@ async def run_odds_harvesting(playwright: Playwright):
                 return_exceptions=True,
             )
 
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 5b. Collect all extraction pairs from completed leagues
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # All browser pages are now closed. No page is open.
+            # Gather any exceptions and flatten the pair lists.
+            all_extraction_pairs: List[Dict] = []
             for result in league_results:
                 if isinstance(result, list):
-                    resolved_matches.extend(result)
-                    resolved_count += len(result)
-
-            unresolved_count = total_fixtures - resolved_count
+                    all_extraction_pairs.extend(result)
 
             print(
-                f"  [Harvest] League phase complete: "
-                f"{resolved_count} fixtures resolved across "
-                f"{total_leagues} leagues "
-                f"({unmapped_count} unmapped/skipped)"
+                f"\n  [Harvest] Extraction phase complete: "
+                f"{total_leagues} leagues navigated, "
+                f"{len(all_extraction_pairs)} fixture pairs collected."
             )
+
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 5c. Resolution phase — runs AFTER all extraction is done
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # Only now does GrokMatcher (fuzzy + LLM) run.
+            # LLM health pings and key consumption happen here,
+            # with zero browser pages open and all league data in memory.
+            resolved_matches: List[Dict] = []
+            resolved_count = 0
+
+            print(
+                f"  [Resolution] Resolving {len(all_extraction_pairs)} fixtures "
+                f"(fuzzy → LLM cascade)..."
+            )
+
+            for pair in all_extraction_pairs:
+                fs_fix     = pair['fs_fix']
+                candidates = pair['candidates']
+
+                match_row, score, method = await matcher.resolve_with_cascade(
+                    fs_fix, candidates, conn
+                )
+
+                if match_row:
+                    match_row["home_id"] = fs_fix.get("home_team_id") or fs_fix.get("home_id")
+                    match_row["away_id"] = fs_fix.get("away_team_id") or fs_fix.get("away_id")
+                    match_row["resolution_method"] = method
+                    save_site_matches([match_row])  # immediate SQLite save
+                    resolved_matches.append(match_row)
+                    resolved_count += 1
+                else:
+                    resolved_matches.append({"status": "failed", "resolution_method": "failed"})
+
+            unresolved_count = len(all_extraction_pairs) - resolved_count
 
             # ── SearchDict: one-shot batch enrichment ──────────────
             all_resolved = [
@@ -507,14 +543,13 @@ async def run_odds_harvesting(playwright: Playwright):
                     print(f"  [Sync] [Warning] Supabase push failed: {e}")
 
             # Session Summary
-            all_resolved = [m for sub in league_results for m in sub]
             method_counts = {
-                "search_terms": sum(1 for m in all_resolved if m.get("resolution_method") == "search_terms"),
-                "fuzzy": sum(1 for m in all_resolved if m.get("resolution_method") == "fuzzy"),
-                "llm": sum(1 for m in all_resolved if m.get("resolution_method") == "llm"),
-                "failed": sum(1 for m in all_resolved if m.get("resolution_method") == "failed"),
+                "search_terms": sum(1 for m in resolved_matches if m.get("resolution_method") == "search_terms"),
+                "fuzzy":        sum(1 for m in resolved_matches if m.get("resolution_method") == "fuzzy"),
+                "llm":          sum(1 for m in resolved_matches if m.get("resolution_method") == "llm"),
+                "failed":       sum(1 for m in resolved_matches if m.get("resolution_method") == "failed"),
             }
-            resolved_count = method_counts["search_terms"] + method_counts["fuzzy"] + method_counts["llm"]
+            resolved_count  = method_counts["search_terms"] + method_counts["fuzzy"] + method_counts["llm"]
             unresolved_count = method_counts["failed"]
 
             print(f"\n    [Ch1 P1] -- Session Summary --------------------------")
