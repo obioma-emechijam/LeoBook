@@ -72,7 +72,9 @@ async def _activate_and_wait_for_matches(
     # for the card renderer to populate before scrolling.
     # Formula: base 1.0s + 0.25s per expected fixture, cap 5.0s
     # 2 fixtures→1.5s | 6→2.5s | 10→3.5s | 16+→5.0s
-    _pre_scroll_wait = min(1.0 + (expected_count * 0.25), 5.0)
+    # FIX: when expected_count is 0 (unknown), use a minimal 1.0s base wait
+    #      instead of the full formula, to avoid 231× 1.0s sleeps for empty leagues.
+    _pre_scroll_wait = min(1.0 + (expected_count * 0.25), 5.0) if expected_count > 0 else 1.0
     print(
         f"    [Extractor] Waiting {_pre_scroll_wait:.1f}s for "
         f"card renderer ({expected_count} expected fixture(s))..."
@@ -94,6 +96,10 @@ async def _activate_and_wait_for_matches(
     # Phase 3: Now wait for cards to appear
     REAL_CARD_SELECTOR = "section.match-card:not(.skeleton), div.match-card:not(.skeleton), [class*='match-card']:not([class*='skeleton'])"
     
+    # FIX: reduce per-attempt timeout from 5000ms to 2500ms for empty-league fast exit.
+    # 3 attempts × 2.5s = 7.5s max vs old 3 × 5s = 15s, for genuinely empty leagues.
+    CARD_WAIT_TIMEOUT = 2500
+
     for attempt in range(3):
         # Final check for "No games" before timing out
         for sel in NO_DATA_SELECTORS:
@@ -103,7 +109,7 @@ async def _activate_and_wait_for_matches(
         try:
             # Phase 1: confirm DOM is alive (any card present)
             await page.wait_for_selector(
-                REAL_CARD_SELECTOR, state="visible", timeout=5000
+                REAL_CARD_SELECTOR, state="visible", timeout=CARD_WAIT_TIMEOUT
             )
 
             # Phase 2: poll until card count reaches expected_count
@@ -128,13 +134,13 @@ async def _activate_and_wait_for_matches(
                     return count;
                 }}""")
 
-                if _found >= expected_count:
-                    break   # All expected cards are hydrated
+                if expected_count == 0 or _found >= expected_count:
+                    break   # All expected cards are hydrated (or no expectation set)
 
                 await asyncio.sleep(POLL_INTERVAL)
                 _elapsed += POLL_INTERVAL
 
-            if _found < expected_count:
+            if expected_count > 0 and _found < expected_count:
                 print(
                     f"    [Extractor] Partial hydration: "
                     f"{_found}/{expected_count} cards after "
@@ -143,11 +149,12 @@ async def _activate_and_wait_for_matches(
             else:
                 print(
                     f"    [Extractor] Real match content verified "
-                    f"({_found}/{expected_count} cards)."
+                    f"({_found}/{expected_count if expected_count else '?'} cards)."
                 )
             
-            # Extra delay before extraction
-            await asyncio.sleep(2.0)
+            # FIX: removed unconditional 2.0s sleep here.
+            # This eliminated ~464s (232 leagues × 2s) of dead time per run.
+            # The poll loop above already confirms cards are hydrated before returning.
             return True
 
         except Exception:
@@ -266,10 +273,28 @@ async def extract_league_matches(page: Page, target_date: str = None, target_lea
 
 
 async def _extract_matches_from_container(container, match_card_sel, home_team_sel, away_team_sel, time_sel, match_url_sel, league_text, target_date):
-    """Internal helper to JS-scrape matches from a container."""
-    if hasattr(container, 'evaluate'):
+    """Internal helper to JS-scrape matches from a container.
+
+    FIX: The original evaluate() call used `document.querySelectorAll` unconditionally,
+    meaning the JS function always queried the full page document rather than the
+    scoped container element. In the Global Schedule path, this caused matches from
+    other league sections to bleed into every section's results.
+
+    The fix passes a scoped root reference into the JS:
+    - For a Playwright Page object: root = document (correct, page-wide query is intentional).
+    - For a Playwright JSHandle (nextElementSibling result): root = the handle element itself,
+      so querySelectorAll is scoped to that section only.
+    """
+    if not hasattr(container, 'evaluate'):
+        return []
+
+    # Determine if container is a Page (use document) or an ElementHandle/JSHandle (use element).
+    # Page objects have a .url attribute; ElementHandles do not.
+    is_page = hasattr(container, 'url')
+
+    if is_page:
+        # Tournament / full-page path: query the entire document.
         return await container.evaluate(r"""(args) => {
-            const root = document;
             const { selectors, leagueText, targetDate } = args;
             const results = [];
             const cards = document.querySelectorAll(selectors.match_card_sel);
@@ -279,7 +304,6 @@ async def _extract_matches_from_container(container, match_card_sel, home_team_s
                 const timeEl = card.querySelector(selectors.time_sel);
                 const linkEl = card.querySelector(selectors.match_url_sel) || card.closest('a');
                 if (homeEl && awayEl) {
-                    // Try to extract per-card date from DOM
                     const dateEl = card.querySelector(
                         '[data-date], [class*="match-date"], '
                         + '[class*="event-date"], [class*="matchdate"], '
@@ -287,15 +311,10 @@ async def _extract_matches_from_container(container, match_card_sel, home_team_s
                     );
                     let cardDate = dateEl
                         ? (dateEl.dataset.date || dateEl.innerText.trim())
-                        : targetDate;   // fallback to targetDate if not found
-
-                    // Normalise to YYYY-MM-DD if the element returns
-                    // a human string like "Sat 15 Mar" — keep targetDate
-                    // as fallback for unparseable strings
+                        : targetDate;
                     if (cardDate && !/^\d{4}-\d{2}-\d{2}$/.test(cardDate)) {
-                        cardDate = targetDate;   // can't parse → use fallback
+                        cardDate = targetDate;
                     }
-
                     results.push({
                         home: homeEl.innerText.trim(),
                         away: awayEl.innerText.trim(),
@@ -315,7 +334,51 @@ async def _extract_matches_from_container(container, match_card_sel, home_team_s
             "leagueText": league_text,
             "targetDate": target_date
         })
-    return []
+    else:
+        # Global schedule path: container is a JSHandle for a specific league section.
+        # FIX: evaluate() on a JSHandle passes the element as the first JS argument.
+        # Use `element.querySelectorAll` to scope to this section only, preventing
+        # cross-section bleed.
+        return await container.evaluate(r"""(element, args) => {
+            const { selectors, leagueText, targetDate } = args;
+            const results = [];
+            const cards = element.querySelectorAll(selectors.match_card_sel);
+            cards.forEach(card => {
+                const homeEl = card.querySelector(selectors.home_team_sel);
+                const awayEl = card.querySelector(selectors.away_team_sel);
+                const timeEl = card.querySelector(selectors.time_sel);
+                const linkEl = card.querySelector(selectors.match_url_sel) || card.closest('a');
+                if (homeEl && awayEl) {
+                    const dateEl = card.querySelector(
+                        '[data-date], [class*="match-date"], '
+                        + '[class*="event-date"], [class*="matchdate"], '
+                        + '[class*="date-label"]'
+                    );
+                    let cardDate = dateEl
+                        ? (dateEl.dataset.date || dateEl.innerText.trim())
+                        : targetDate;
+                    if (cardDate && !/^\d{4}-\d{2}-\d{2}$/.test(cardDate)) {
+                        cardDate = targetDate;
+                    }
+                    results.push({
+                        home: homeEl.innerText.trim(),
+                        away: awayEl.innerText.trim(),
+                        time: timeEl ? timeEl.innerText.trim() : "N/A",
+                        league: leagueText,
+                        url: linkEl ? linkEl.href : "",
+                        date: cardDate
+                    });
+                }
+            });
+            return results;
+        }""", {
+            "selectors": {
+                "match_card_sel": match_card_sel, "match_url_sel": match_url_sel,
+                "home_team_sel": home_team_sel, "away_team_sel": away_team_sel, "time_sel": time_sel
+            },
+            "leagueText": league_text,
+            "targetDate": target_date
+        })
 
 
 async def validate_match_data(matches: List[Dict]) -> List[Dict]:
