@@ -8,7 +8,7 @@ Betting Markets Module
 Generates predictions for comprehensive betting markets with a focus on safety and certainty.
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 class BettingMarkets:
     """Generates predictions for various betting markets"""
@@ -272,3 +272,76 @@ class BettingMarkets:
             return format_selection(dc, "fallback_swap_dc")
 
         return format_selection(top, "fallback")
+
+    # ── 30-dim Poisson-based market predictions ──────────────
+    @staticmethod
+    def generate_30dim_predictions(
+        home_xg: float, away_xg: float,
+        raw_scores: Dict[str, float] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Generate predictions for ALL 30 actions using the Poisson engine
+        from market_space.py.  Returns dict keyed by action key.
+        Each value contains: market, outcome, line, prob, odds, ev, gated, gate_reason.
+        """
+        from Core.Intelligence.rl.market_space import (
+            ACTIONS, compute_poisson_probs, SYNTHETIC_ODDS,
+            stairway_gate,
+        )
+
+        probs = compute_poisson_probs(home_xg, away_xg, raw_scores)
+        predictions: Dict[str, Dict[str, Any]] = {}
+
+        for action in ACTIONS:
+            key = action["key"]
+            if key == "no_bet":
+                continue
+
+            prob = probs.get(key, 0.0)
+            odds = SYNTHETIC_ODDS.get(key, 0.0)
+            ev = (prob * odds) - 1.0 if odds > 0 else -1.0
+            gated, gate_reason = stairway_gate(key, None, prob)
+
+            predictions[key] = {
+                "market_type": action["market"],
+                "market_prediction": f"{action['outcome']}" + (f" {action['line']}" if action.get("line") else ""),
+                "action_key": key,
+                "line": action.get("line"),
+                "market_id": action.get("market_id"),
+                "prob": round(prob, 4),
+                "odds": round(odds, 3),
+                "ev": round(ev, 4),
+                "gated": gated,
+                "gate_reason": gate_reason,
+                "confidence_score": prob,
+            }
+
+        return predictions
+
+    @staticmethod
+    def select_best_30dim(
+        predictions_30: Dict[str, Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        From 30-dim Poisson predictions, pick the single best gated market by EV.
+        Returns None if nothing passes the gate.
+        """
+        gated = [v for v in predictions_30.values() if v.get("gated")]
+        if not gated:
+            return None
+
+        # Sort by EV descending, break ties by higher probability
+        gated.sort(key=lambda x: (x["ev"], x["prob"]), reverse=True)
+        best = gated[0]
+
+        return {
+            "market_key": best["action_key"],
+            "market_type": best["market_type"],
+            "prediction": best["market_prediction"],
+            "prob": best["prob"],
+            "odds": best["odds"],
+            "ev": best["ev"],
+            "confidence": best["prob"],
+            "reason": best["gate_reason"],
+        }
+

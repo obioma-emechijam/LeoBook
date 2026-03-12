@@ -580,7 +580,7 @@ async def run_utility(args):
     elif args.diagnose_rl:
         print("\n  --- LEO: RL Decision Inspector ---")
         from Scripts.rl_diagnose import main as run_rl_diagnose
-        run_rl_diagnose()
+        run_rl_diagnose(args)
 
 
 # ============================================================

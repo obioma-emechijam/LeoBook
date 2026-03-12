@@ -330,10 +330,14 @@ async def run_predictions(conn=None, fixtures: List[Dict] = None, scheduler=None
                 # Derive picks
                 rl_probs = rl_prediction.get("rl_action_probs", {})
                 rl_pick_key = max(rl_probs, key=rl_probs.get) if rl_probs else "no_bet"
-                raw_scores = rule_prediction.get("raw_scores", {})
-                rule_pick_map = {"home": "home_win", "draw": "draw", "away": "away_win"}
-                rule_pick_key = rule_pick_map.get(max(raw_scores, key=raw_scores.get), "no_bet") if raw_scores else "no_bet"
-                ensemble_pick_key = rl_pick_key  # RL pick is the primary recommendation
+
+                # 30-dim rule pick (upgraded from 1X2-only)
+                best_30 = rule_prediction.get("best_30dim")
+                rule_pick_key = best_30["market_key"] if best_30 else "no_bet"
+
+                # Ensemble: use RL pick if RL is active, otherwise 30-dim rule pick
+                is_symbolic = prediction.get("ensemble_path") == "symbolic_fallback"
+                ensemble_pick_key = rule_pick_key if is_symbolic else rl_pick_key
 
                 log_paper_trade(
                     fixture_id=fixture_id,
@@ -344,7 +348,7 @@ async def run_predictions(conn=None, fixtures: List[Dict] = None, scheduler=None
                     rl_pick=rl_pick_key,
                     rule_pick=rule_pick_key,
                     ensemble_pick=ensemble_pick_key,
-                    model_prob=rl_prediction.get("ml_confidence", 0.0),
+                    model_prob=best_30["prob"] if best_30 else 0.0,
                     rl_confidence=rl_prediction.get("ml_confidence"),
                     rule_confidence=rule_prediction.get("market_reliability"),
                 )

@@ -167,6 +167,13 @@ class RuleEngine:
             scores, home_xg, away_xg, reasoning
         )
 
+        # --- 30-dim Poisson market predictions (full action space) ---
+        raw_scores_dict = {"home": home_score, "draw": draw_score, "away": away_score}
+        predictions_30dim = BettingMarkets.generate_30dim_predictions(
+            home_xg, away_xg, raw_scores_dict
+        )
+        best_30dim = BettingMarkets.select_best_30dim(predictions_30dim)
+
         
         # --- SELECTION STRATEGY: Use config's risk preference ---
         selection = BettingMarkets.select_best_market(betting_markets, risk_preference=config.risk_preference)
@@ -186,13 +193,18 @@ class RuleEngine:
         if not best_prediction:
              return {"type": "SKIP", "confidence": "Low", "reason": ["No valid markets"]}
 
-        # Format prediction text
-        prediction_text = best_prediction["market_prediction"]
-        
+        # --- 30-dim upgrade: if Poisson found a gated market with +EV, prefer it ---
+        if best_30dim and best_30dim["ev"] > 0:
+            # Override with 30-dim pick if its EV is genuinely positive
+            prediction_text = f"{best_30dim['market_type']} → {best_30dim['prediction']}"
+            raw_conf = best_30dim["prob"]
+        else:
+            # Keep existing ~10-market pick
+            prediction_text = best_prediction["market_prediction"]
+            raw_conf = best_prediction.get("confidence_score", 0.5)
+
         # Confidence Calibration (Manual Fallback)
         confidence_calibration = weights.get("confidence_calibration", {})
-        # Map score to category
-        raw_conf = best_prediction.get("confidence_score", 0.5)
         
         if raw_conf > 0.8: base_conf = "Very High"
         elif raw_conf > 0.65: base_conf = "High"
@@ -234,7 +246,7 @@ class RuleEngine:
 
         # Calculate final recommendation_score for the UI "TOP PREDICTIONS" section
         # Formula: Confidence Score (0-1) * 100, plus bonuses for xG clarity
-        raw_confidence = best_prediction.get("confidence_score", 0.5)
+        raw_confidence = raw_conf
         rec_score = int(raw_confidence * 85) # Base weight
         if (home_xg + away_xg) > 2.5: rec_score += 10
         if final_confidence == "Very High": rec_score += 5
@@ -243,7 +255,7 @@ class RuleEngine:
         return {
             "market_prediction": prediction_text,
             "type": prediction_text,
-            "market_type": best_prediction["market_type"],
+            "market_type": best_30dim["market_type"] if best_30dim and best_30dim["ev"] > 0 else best_prediction["market_type"],
             "confidence": final_confidence,
             "recommendation_score": min(rec_score, 100),
             "market_reliability": round(raw_confidence * 100, 1),
@@ -259,7 +271,9 @@ class RuleEngine:
             "h2h_tags": h2h_tags,
             "standings_tags": standings_tags,
             "ml_confidence": ml_prediction.get("confidence", 0.5),
-            "betting_markets": betting_markets, 
+            "betting_markets": betting_markets,
+            "action_probs_30dim": predictions_30dim,
+            "best_30dim": best_30dim,
             "h2h_n": len(h2h),
             "home_form_n": len(home_form),
             "away_form_n": len(away_form),
@@ -270,3 +284,4 @@ class RuleEngine:
                 "away": away_score
             }
         }
+

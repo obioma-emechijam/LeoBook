@@ -160,6 +160,10 @@ Examples:
   python Leo.py --train-rl --league ID   Fine-tune a specific league adapter
   python Leo.py --data-quality           Run diagnostics and immediate gap fixes
   python Leo.py --season-completeness    Refresh and print match coverage report
+  python Leo.py --diagnose-rl            Inspect RL decisions for next 5 upcoming fixtures
+  python Leo.py --diagnose-rl --all-played --top 3   Last 3 completed matches
+  python Leo.py --diagnose-rl --fixture FIXTURE_ID   Deep-dive on a specific match
+  python Leo.py --diagnose-rl --checkpoint Data/Store/models/checkpoints/phase1_day038.pth
         """
     )
     # --- Granular Chapter / Page Selection ---
@@ -248,6 +252,14 @@ Examples:
     # --- RL Diagnostics ---
     parser.add_argument('--diagnose-rl', action='store_true',
                          help='Inspect per-match RL decisions (30-dim action probs, EV, Kelly, Gate)')
+    parser.add_argument('--all-played', action='store_true',
+                         help='Diagnose recent played matches (use with --diagnose-rl)')
+    parser.add_argument('--top', type=int, default=5, metavar='N',
+                         help='Number of fixtures to diagnose (use with --diagnose-rl, default: 5)')
+    parser.add_argument('--fixture', type=str, metavar='ID',
+                         help='Specific fixture_id to diagnose (use with --diagnose-rl)')
+    parser.add_argument('--checkpoint', type=str, metavar='PATH',
+                         help='Path to .pth checkpoint (use with --diagnose-rl)')
 
     # --- Model Sync (Supabase Storage) ---
     parser.add_argument('--push-models', action='store_true',

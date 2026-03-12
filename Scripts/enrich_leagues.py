@@ -1187,6 +1187,7 @@ async def main(
     refresh: bool = False,
     scan_only: bool = False,
     min_severity: str = "important",
+    drain_queue: bool = False,
 ) -> None:
     print("\n" + "=" * 60)
     print("  FLASHSCORE LEAGUE ENRICHMENT -> SQLite")
@@ -1195,7 +1196,16 @@ async def main(
     conn = init_db()
     print(f"  [DB] {os.path.abspath(conn.execute('PRAGMA database_list').fetchone()[2])}")
 
-    await drain_enrichment_queue(conn)
+    # Queue drain: only runs when explicitly requested via --drain-queue.
+    # In normal enrichment runs, silently skips exhausted items (attempts >= 2)
+    # so no browser startup overhead is added to every invocation.
+    if drain_queue:
+        await drain_enrichment_queue(conn, force=True)
+        conn.close()
+        return
+    else:
+        # Non-blocking notification: logs exhausted item count, no browser opened
+        await drain_enrichment_queue(conn, force=False)
 
     if reset:
         conn.execute("UPDATE leagues SET processed = 0")
@@ -1470,17 +1480,49 @@ async def main(
 #  Enrichment Queue Drain
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def drain_enrichment_queue(conn) -> None:
+async def drain_enrichment_queue(conn, *, force: bool = False) -> None:
+    """Drain PENDING items from the enrichment queue.
+
+    Args:
+        force: If True, retry items with up to 2 prior failures.
+               When called from the default enrichment path this is always
+               False so exhausted items never block a normal run.
+
+    Items with attempts >= 2 are silently skipped unless force=True.
+    Items at 3+ attempts are permanently FAILED and never retried.
+    """
     from Core.System.gap_resolver import GapResolver
     GapResolver._ensure_queue_table()
+
+    # Default path: only attempt items with 0 or 1 prior failures
+    max_attempts_allowed = 3 if force else 1
+
     pending = conn.execute("""
         SELECT * FROM enrichment_queue
-        WHERE status = 'PENDING' AND priority = 1
+        WHERE status = 'PENDING'
+          AND priority = 1
+          AND (attempts IS NULL OR attempts < ?)
+        ORDER BY attempts ASC
         LIMIT 50
-    """).fetchall()
+    """, (max_attempts_allowed,)).fetchall()
+
     if not pending:
+        skipped = conn.execute("""
+            SELECT COUNT(*) FROM enrichment_queue
+            WHERE status = 'PENDING' AND priority = 1
+              AND attempts >= ?
+        """, (max_attempts_allowed,)).fetchone()[0]
+        if skipped and not force:
+            print(f"\n  [Queue] {skipped} exhausted queue item(s) skipped "
+                  f"(run with --drain-queue to force retry).")
         return
-    print(f"\n  [Queue] Draining {len(pending)} CRITICAL items...")
+
+    print(f"\n  [Queue] Draining {len(pending)} CRITICAL item(s) "
+          f"({'forced retry' if force else 'fresh only'})...")
+
+    resolved = 0
+    failed   = 0
+
     from playwright.async_api import async_playwright
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -1495,7 +1537,8 @@ async def drain_enrichment_queue(conn) -> None:
             col        = item["column_name"]
             lookup_key = json.loads(item["lookup_key"])
             label      = lookup_key.get("league_name") or lookup_key.get("team_name") or "Unknown"
-            print(f"    - Resolving {table} ID for: {label}")
+            attempts   = (item["attempts"] or 0) + 1
+            print(f"    - Resolving {table} ID for: {label} (attempt {attempts}/3)")
             new_id = await resolve_id_via_search(context, table, lookup_key)
             if new_id:
                 conn.execute(f"UPDATE {table} SET {col} = ? WHERE id = ?", (new_id, row_id))
@@ -1504,15 +1547,19 @@ async def drain_enrichment_queue(conn) -> None:
                     (datetime.now().isoformat(), item_id)
                 )
                 print(f"      [✓] {new_id}")
+                resolved += 1
             else:
-                attempts = (item["attempts"] or 0) + 1
+                new_status = "FAILED" if attempts >= 3 else "PENDING"
                 conn.execute(
                     "UPDATE enrichment_queue SET attempts=?, status=? WHERE id=?",
-                    (attempts, "FAILED" if attempts >= 3 else "PENDING", item_id)
+                    (attempts, new_status, item_id)
                 )
-                print(f"      [✗] Attempt {attempts}/3")
+                print(f"      [✗] {new_status} (attempt {attempts}/3)")
+                failed += 1
             conn.commit()
         await browser.close()
+
+    print(f"  [Queue] Done — {resolved} resolved, {failed} unresolved.")
 
 
 async def resolve_id_via_search(context, table: str, lookup_key: Dict) -> Optional[str]:
@@ -1570,6 +1617,8 @@ if __name__ == "__main__":
     parser.add_argument("--min-severity", default="important",
                         choices=["critical", "important", "enrichable"],
                         help="Minimum gap severity to include in enrichment targets (default: important)")
+    parser.add_argument("--drain-queue",  action="store_true",
+                        help="Drain the enrichment queue (force-retry all PENDING items incl. exhausted), then exit")
     args = parser.parse_args()
 
     limit_count = None
@@ -1592,4 +1641,5 @@ if __name__ == "__main__":
         refresh=args.refresh,
         scan_only=args.scan_only,
         min_severity=args.min_severity,
+        drain_queue=args.drain_queue,
     ))
