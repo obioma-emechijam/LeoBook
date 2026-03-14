@@ -494,18 +494,32 @@ async def run_utility(args):
         phase = getattr(args, 'phase', 1)
         cold = getattr(args, 'cold', False)
         resume = getattr(args, 'resume', False)
-        limit = getattr(args, '_limit_count', None) # Use --limit for days if needed
-        
+        limit = getattr(args, '_limit_count', None)  # Use --limit for days if needed
+
+        # ── Season scope resolution ──────────────────────────────────────────────
+        # --train-season accepts: "current", "all", an integer offset (e.g. "1"),
+        # or an explicit season label (e.g. "2024/2025"). Digit strings are coerced
+        # to int so trainer._get_season_dates() receives the correct type.
+        train_season = getattr(args, 'train_season', 'current')
+        if isinstance(train_season, str) and train_season.isdigit():
+            train_season = int(train_season)
+
         league_id = getattr(args, 'league', None)
         if league_id:
-            print(f"  [RL] League-specific training: {league_id} (Phase {phase})")
+            print(f"  [RL] League-specific training: {league_id} (Phase {phase}, season={train_season!r})")
             trainer.load()
-            trainer.train_from_fixtures(phase=phase, cold=cold, limit_days=limit, resume=resume)
+            trainer.train_from_fixtures(
+                phase=phase, cold=cold, limit_days=limit,
+                resume=resume, target_season=train_season,
+            )
         else:
-            print(f"  [RL] Starting Phase {phase} training...")
+            print(f"  [RL] Starting Phase {phase} training (season={train_season!r})...")
             if phase > 1:
                 trainer.load()
-            trainer.train_from_fixtures(phase=phase, cold=cold, limit_days=limit, resume=resume)
+            trainer.train_from_fixtures(
+                phase=phase, cold=cold, limit_days=limit,
+                resume=resume, target_season=train_season,
+            )
         print("  [SUCCESS] RL training session complete.")
 
     elif getattr(args, 'push_models', False):
