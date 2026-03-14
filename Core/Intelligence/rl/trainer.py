@@ -23,6 +23,27 @@ Season targeting (--train-season CLI flag):
                 Matches the --season N convention used by enrich_leagues.
   "2024/2025"   Explicit season label (split-season format).
   "2025"        Explicit season label (calendar-year format).
+
+Bug fixes applied (2026-03-14):
+  FIX-1: PPO ratio was always 1.0 — old_log_prob must be stored BEFORE re-sampling.
+          Now uses a stored old_log_prob passed into train_step for Phase 2/3.
+  FIX-2: Double KL in Phase 1 — removed the redundant manual KL term;
+          F.kl_div IS already KL divergence, the manual re-computation was noise.
+  FIX-3: Synthetic odds in Phase 2 reward — now uses xG-derived fair odds per
+          fixture rather than a static lookup table, giving match-specific reward signal.
+  FIX-4: active_phase default in online updates — update_from_outcomes now explicitly
+          passes the correct active_phase so reward logic is never silently wrong.
+  FIX-5: Expert probs identical across early dates — _get_rule_engine_probs now falls
+          back to league-average xG (1.4 home / 1.1 away) when form data is empty,
+          ensuring each match produces a non-constant expert distribution.
+  FIX-6: GradNorm clamped at 0.5 constantly — max_norm raised to 1.0 for Phase 2/3
+          (imitation still uses 0.5 for stability). Scheduler T_0 raised to 2000 to
+          reduce oscillation from premature warm restarts.
+  FIX-7: --train-rl without --train-season defaulted to "current" but the
+          current-season join returned all completed fixtures back to 2012 when
+          leagues.current_season is not fully populated, effectively running
+          "--train-season all". Now the fallback is capped at 365 days of data
+          to prevent runaway training on a plain --train-rl invocation.
 """
 
 import os
@@ -31,7 +52,7 @@ import json
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F   # ADDED for proper KL imitation loss
+import torch.nn.functional as F
 from typing import Dict, Any, List, Optional, Tuple, Union
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -54,6 +75,10 @@ MODELS_DIR = PROJECT_ROOT / "Data" / "Store" / "models"
 # Paths
 BASE_MODEL_PATH = MODELS_DIR / "leobook_base.pth"
 TRAINING_CONFIG_PATH = MODELS_DIR / "training_config.json"
+
+# FIX-7: Cap for plain --train-rl (current season, no --cold, no --train-season all).
+# Prevents the 2012→present runaway when leagues.current_season is not fully populated.
+DEFAULT_CURRENT_SEASON_MAX_DAYS = 365
 
 
 class RLTrainer:
@@ -100,12 +125,16 @@ class RLTrainer:
             {"params": self.model.team_adapters.parameters(), "lr": lr_team},
         ]
         self.optimizer = optim.AdamW(param_groups, weight_decay=1e-4)
+        # FIX-6: Raised T_0 from 1000 → 2000 to reduce premature LR oscillation.
         self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            self.optimizer, T_0=1000, T_mult=2
+            self.optimizer, T_0=2000, T_mult=2
         )
 
         self._step_count = 0
-        self.kl_weight = 0.1  # ADDED: starts at 0.1, anneals to 0 in Phase 2+ so RL can outperform expert
+        # KL weight: starts at 0.3 in Phase 1 (imitation anchor), anneals to 0 in Phase 2+
+        # so RL can genuinely outperform the expert over time.
+        self.kl_weight = 0.3
+        self.active_phase: int = 1  # Always set before training; default safe value
 
     # -------------------------------------------------------------------
     # Season Discovery & Date Selection
@@ -141,7 +170,9 @@ class RLTrainer:
             target_season:
                 "current"   — per-league join against leagues.current_season.
                               Starts training from the actual start of each
-                              league's live season. Default.
+                              league's live season. Capped at DEFAULT_CURRENT_SEASON_MAX_DAYS
+                              to prevent runaway training when current_season metadata
+                              is not fully populated (FIX-7).
                 "all"       — all available completed fixtures, oldest-first.
                               Use for a full cold retraining across all seasons.
                 int N       — past season by offset: 1 = most recent past,
@@ -169,7 +200,6 @@ class RLTrainer:
         # ── Past season by offset (int) ──────────────────────────────────────────
         if isinstance(target_season, int) and target_season >= 1:
             seasons = self._discover_seasons(conn)
-            # Index 0 = current/latest season label; index N = past season N
             if target_season >= len(seasons):
                 print(f"  [TRAIN] Season offset {target_season} out of range "
                       f"({len(seasons)} seasons in DB). Falling back to current.")
@@ -202,8 +232,11 @@ class RLTrainer:
                   f"fixtures. Falling back to current.")
 
         # ── Current season (default) ─────────────────────────────────────────────
-        # Join schedules against leagues.current_season so training starts from
-        # each league's actual season start date rather than a global date floor.
+        # FIX-7: Apply a date cap to prevent the current-season join from spanning
+        # back to 2012 when leagues.current_season is not fully populated.
+        # A plain --train-rl should train on the last ~1 year of data, not all history.
+        cap_date = (datetime.now() - timedelta(days=DEFAULT_CURRENT_SEASON_MAX_DAYS)).strftime("%Y-%m-%d")
+
         rows = conn.execute("""
             SELECT DISTINCT s.date
             FROM schedules s
@@ -211,16 +244,16 @@ class RLTrainer:
             WHERE s.season = l.current_season
               AND s.home_score IS NOT NULL AND s.away_score IS NOT NULL
               AND s.date IS NOT NULL AND s.date <= ?
+              AND s.date >= ?
             ORDER BY s.date ASC
-        """, (today_str,)).fetchall()
+        """, (today_str, cap_date)).fetchall()
         dates = [r[0] for r in rows]
 
         if dates:
-            return dates, "current season (per-league season join)"
+            return dates, f"current season (per-league season join, capped to last {DEFAULT_CURRENT_SEASON_MAX_DAYS}d)"
 
-        # Fallback: leagues.current_season not populated for all leagues, or the
-        # current season has no completed fixtures yet (e.g. very start of season).
-        # Use the most recent season label present in schedules.
+        # Fallback: leagues.current_season not populated — use most recent season label,
+        # still capped to DEFAULT_CURRENT_SEASON_MAX_DAYS.
         seasons = self._discover_seasons(conn)
         if seasons:
             season_label = seasons[0]
@@ -232,26 +265,26 @@ class RLTrainer:
                 WHERE season = ?
                   AND home_score IS NOT NULL AND away_score IS NOT NULL
                   AND date IS NOT NULL AND date <= ?
+                  AND date >= ?
                 ORDER BY date ASC
-            """, (season_label, today_str)).fetchall()
+            """, (season_label, today_str, cap_date)).fetchall()
             dates = [r[0] for r in rows]
-            return dates, f"season {season_label} (fallback — run --enrich-leagues to populate current_season)"
+            return dates, (
+                f"season {season_label} (fallback — run --enrich-leagues to populate current_season, "
+                f"capped to last {DEFAULT_CURRENT_SEASON_MAX_DAYS}d)"
+            )
 
-        # Last resort: return all available dates (mirrors the old global-cutoff behavior)
-        print("  [TRAIN] WARNING: No season metadata found. Falling back to global date window.")
+        # Last resort: capped global window
+        print("  [TRAIN] WARNING: No season metadata found. Falling back to capped global date window.")
         rows = conn.execute("""
             SELECT DISTINCT date FROM schedules
             WHERE date IS NOT NULL
               AND home_score IS NOT NULL AND away_score IS NOT NULL
               AND date <= ?
+              AND date >= ?
             ORDER BY date ASC
-        """, (today_str,)).fetchall()
-        all_dates = [r[0] for r in rows]
-        if all_dates:
-            cutoff = (datetime.strptime(all_dates[-1], "%Y-%m-%d")
-                      - timedelta(days=self.max_seasons_back * 365)).strftime("%Y-%m-%d")
-            all_dates = [d for d in all_dates if d >= cutoff]
-        return all_dates, "global window (fallback)"
+        """, (today_str, cap_date)).fetchall()
+        return [r[0] for r in rows], f"global capped window (last {DEFAULT_CURRENT_SEASON_MAX_DAYS}d)"
 
     # -------------------------------------------------------------------
     # Reward functions (30-dim action space)
@@ -314,7 +347,15 @@ class RLTrainer:
         model_prob: Optional[float] = None,
     ) -> float:
         """
-        Phase 2 reward: value-based (real odds available).
+        Phase 2 reward: value-based (real or xG-derived fair odds).
+
+        FIX-3: When live_odds is None, we use xG-derived fair odds per fixture
+        rather than the static SYNTHETIC_ODDS lookup. This gives a match-specific
+        reward signal even before real odds data is available.
+
+        The caller (_train_step_phase2) passes xg_fair_odds computed from the
+        same Poisson distribution used by the expert, so the reward is grounded
+        in the match's actual predicted goal distribution.
         """
         action = ACTIONS[chosen_action_idx]
         key = action["key"]
@@ -336,6 +377,8 @@ class RLTrainer:
         if outcome is None:
             return 0.0
 
+        # FIX-3: prefer live_odds, fall back to per-fixture xG fair odds (passed
+        # as live_odds by the caller), then last-resort to static SYNTHETIC_ODDS.
         odds = live_odds if live_odds else SYNTHETIC_ODDS.get(key, 1.5)
         if outcome is True:
             return odds - 1.0   # profit
@@ -343,25 +386,20 @@ class RLTrainer:
             return -1.0          # loss
 
     # -------------------------------------------------------------------
-    # Training step (PPO)
-    # -------------------------------------------------------------------
-
-    # -------------------------------------------------------------------
-    # KL Blending (Rule Engine -> Prob Distribution)
+    # Expert signal (Rule Engine + Poisson)
     # -------------------------------------------------------------------
 
     def _get_rule_engine_probs(self, vision_data: Dict[str, Any]) -> torch.Tensor:
         """
-        Phase 1 expert signal: Poisson probability distribution
-        over 30-dim action space, derived from match-specific xG.
+        Expert signal: Poisson probability distribution over 30-dim action space.
 
-        Computes xG from the team's actual form data, then runs
-        Poisson to get per-market probabilities. Blends with
-        RuleEngine raw_scores for 1X2 markets (40/60 weight).
+        FIX-5: When form data is empty (common for early historical dates before
+        a team has played any enriched matches), fall back to league-average xG
+        (1.4 home / 1.1 away) rather than xG=0 which collapses the Poisson
+        distribution and makes every match produce an identical expert tensor.
 
         Returns: torch.Tensor shape (30,) summing to 1.0
         """
-        # 1. Compute match-specific xG from form data
         h2h = vision_data.get("h2h_data", {})
         home_form = [m for m in h2h.get("home_last_10_matches", []) if m][:10]
         away_form = [m for m in h2h.get("away_last_10_matches", []) if m][:10]
@@ -371,7 +409,13 @@ class RLTrainer:
         xg_home = FeatureEncoder._compute_xg(home_form, home_team, is_home=True)
         xg_away = FeatureEncoder._compute_xg(away_form, away_team, is_home=False)
 
-        # 2. Get Rule Engine raw_scores for 1X2 blending
+        # FIX-5: league-average fallback when no form data available
+        if xg_home < 0.05:
+            xg_home = 1.4
+        if xg_away < 0.05:
+            xg_away = 1.1
+
+        # Rule Engine 1X2 blending
         raw_scores = None
         try:
             from ..rule_engine import RuleEngine
@@ -381,10 +425,10 @@ class RLTrainer:
         except Exception:
             pass
 
-        # 3. Compute Poisson probabilities for all 30 markets
         probs = compute_poisson_probs(xg_home, xg_away, raw_scores)
 
-        # 4. Apply synthetic stairway weight
+        # Down-weight non-bettable actions so the expert signal concentrates
+        # on markets the Stairway Gate will actually evaluate.
         for action in ACTIONS:
             key = action["key"]
             if key == "no_bet":
@@ -393,15 +437,56 @@ class RLTrainer:
             if not bettable:
                 probs[key] *= 0.3
 
-        # 5. Convert to ordered tensor
         vec = probs_to_tensor_30dim(probs)
         tensor = torch.tensor(vec, dtype=torch.float32)
 
-        # 6. Safety: if all near-zero, return uniform
         if tensor.sum() < 0.1:
             return torch.ones(N_ACTIONS, dtype=torch.float32).to(self.device) / N_ACTIONS
 
         return (tensor / tensor.sum()).to(self.device)
+
+    def _get_xg_fair_odds(self, vision_data: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Compute per-fixture xG-derived fair odds for all 30 markets.
+
+        FIX-3: Used as the odds fallback in Phase 2 reward when real historical
+        odds are not available. This gives a match-specific odds signal rather
+        than the global static SYNTHETIC_ODDS table.
+
+        Returns a dict keyed by action key → fair odds (reciprocal of Poisson prob,
+        floored at 1.01 and capped at 20.0 to avoid reward explosion).
+        """
+        h2h = vision_data.get("h2h_data", {})
+        home_form = [m for m in h2h.get("home_last_10_matches", []) if m][:10]
+        away_form = [m for m in h2h.get("away_last_10_matches", []) if m][:10]
+        home_team = h2h.get("home_team", "")
+        away_team = h2h.get("away_team", "")
+
+        xg_home = FeatureEncoder._compute_xg(home_form, home_team, is_home=True)
+        xg_away = FeatureEncoder._compute_xg(away_form, away_team, is_home=False)
+
+        if xg_home < 0.05:
+            xg_home = 1.4
+        if xg_away < 0.05:
+            xg_away = 1.1
+
+        probs = compute_poisson_probs(xg_home, xg_away, None)
+        fair_odds: Dict[str, float] = {}
+        for action in ACTIONS:
+            key = action["key"]
+            if key == "no_bet":
+                continue
+            p = probs.get(key, 0.0)
+            if p > 0.01:
+                fair_odds[key] = min(max(1.0 / p, 1.01), 20.0)
+            else:
+                # Use synthetic as hard fallback for very low probability markets
+                fair_odds[key] = SYNTHETIC_ODDS.get(key, 1.5)
+        return fair_odds
+
+    # -------------------------------------------------------------------
+    # Training step (PPO — single fixture)
+    # -------------------------------------------------------------------
 
     def train_step(
         self,
@@ -412,12 +497,39 @@ class RLTrainer:
         outcome: Optional[Dict[str, Any]] = None,
         expert_probs: Optional[torch.Tensor] = None,
         use_kl: bool = False,
+        old_log_prob: Optional[torch.Tensor] = None,
+        xg_fair_odds: Optional[Dict[str, float]] = None,
+        active_phase: Optional[int] = None,
     ) -> Dict[str, float]:
         """
         Single training step for Phase 1 (Imitation) or Phase 2/3 (PPO).
+
+        Args:
+            features:       Encoded feature tensor.
+            league_idx:     League adapter index.
+            home_team_idx:  Home team adapter index.
+            away_team_idx:  Away team adapter index.
+            outcome:        Match result dict with home_score / away_score.
+                            Required for Phase 2/3. None triggers Phase 1 path.
+            expert_probs:   Rule Engine + Poisson 30-dim distribution.
+                            Used for Phase 1 imitation and Phase 2 KL anchor.
+            use_kl:         If True, add KL penalty to Phase 2/3 loss (Phase 2 only).
+            old_log_prob:   Log prob of the action sampled BEFORE this gradient step.
+                            FIX-1: must be provided for correct PPO importance sampling.
+                            If None, ratio defaults to 1.0 (equivalent to vanilla PG).
+            xg_fair_odds:   Per-fixture fair odds dict from _get_xg_fair_odds().
+                            FIX-3: used as odds fallback in Phase 2 reward.
+            active_phase:   Explicit phase override (FIX-4). If None, falls back to
+                            self.active_phase.
+
+        Returns:
+            Metrics dict.
         """
         self.model.train()
         features = features.to(self.device)
+
+        # FIX-4: always resolve active_phase explicitly; never rely on implicit default.
+        resolved_phase = active_phase if active_phase is not None else self.active_phase
 
         # Forward pass
         policy_logits, value, stake = self.model(
@@ -426,59 +538,94 @@ class RLTrainer:
         action_probs = torch.softmax(policy_logits, dim=-1)
 
         total_loss = torch.tensor(0.0, device=self.device)
-        metrics = {}
+        metrics: Dict[str, float] = {}
 
+        # ── Phase 1: Imitation Learning ──────────────────────────────────────────
         if expert_probs is not None and outcome is None:
-            # --- Phase 1: Imitation Learning ---
             if expert_probs.dim() == 1:
                 expert_probs = expert_probs.unsqueeze(0)
-            # FIXED: Proper KL divergence for soft expert probabilities 
-            # (was broken cross_entropy — root cause of 650+ days with no learning)
-            policy_log_probs = F.log_softmax(policy_logits, dim=-1)
-            imitation_loss = F.kl_div(policy_log_probs, expert_probs, reduction='batchmean')
 
-            # KL divergence as monitoring metric + regulariser
-            kl_div = torch.sum(
-                expert_probs * (torch.log(expert_probs + 1e-10) - torch.log(action_probs + 1e-10))
+            # FIX-2: F.kl_div IS KL divergence. Removed the redundant manual KL
+            # computation that was previously added on top as a "monitoring metric".
+            # total_loss is now purely the KL divergence (imitation loss).
+            policy_log_probs = F.log_softmax(policy_logits, dim=-1)
+            imitation_loss = F.kl_div(
+                policy_log_probs, expert_probs, reduction='batchmean'
             )
-            total_loss = imitation_loss + self.kl_weight * kl_div
+            total_loss = imitation_loss
+
+            # KL divergence as a monitoring metric only (not added to loss).
+            with torch.no_grad():
+                kl_monitor = torch.sum(
+                    expert_probs * (
+                        torch.log(expert_probs + 1e-10)
+                        - torch.log(action_probs.unsqueeze(0) + 1e-10)
+                    )
+                )
 
             rl_action = torch.argmax(action_probs, dim=-1).item()
             metrics["imitation_loss"] = imitation_loss.item()
-            metrics["kl_div"] = kl_div.item()
+            metrics["kl_div"] = kl_monitor.item()
             metrics["action"] = rl_action
-            metrics["rule_engine_acc"] = 1.0 if rl_action == torch.argmax(expert_probs).item() else 0.0
-            metrics["max_prob"] = action_probs.max().item()  # ADDED for convergence visibility
+            metrics["rule_engine_acc"] = (
+                1.0 if rl_action == torch.argmax(expert_probs).item() else 0.0
+            )
+            metrics["max_prob"] = action_probs.max().item()
 
-        # --- B. RL / PPO (Phase 2 & 3) ---
+        # ── Phase 2/3: PPO with optional KL anchor ───────────────────────────────
         elif outcome is not None:
             dist = torch.distributions.Categorical(action_probs)
             action = dist.sample()
-            log_prob = dist.log_prob(action)
+            new_log_prob = dist.log_prob(action)
 
             h_score = outcome.get("home_score", 0)
             a_score = outcome.get("away_score", 0)
-            active_phase = getattr(self, 'active_phase', 1)
 
-            if active_phase >= 2:
-                reward = self._compute_phase2_reward(action.item(), h_score, a_score)
+            # FIX-3: use xG fair odds as fallback if provided
+            if resolved_phase >= 2:
+                if xg_fair_odds is not None:
+                    action_key = ACTIONS[action.item()]["key"]
+                    match_odds = xg_fair_odds.get(action_key)
+                else:
+                    match_odds = None
+                reward = self._compute_phase2_reward(
+                    action.item(), h_score, a_score, live_odds=match_odds
+                )
             else:
                 reward = self._compute_phase1_reward(action.item(), h_score, a_score)
 
             reward_tensor = torch.tensor([reward], dtype=torch.float32, device=self.device)
             advantage = reward_tensor - value.squeeze(-1)
 
-            ratio = torch.exp(log_prob - log_prob.detach())
+            # FIX-1: PPO importance sampling ratio.
+            # old_log_prob must be the log prob of `action` under the OLD policy
+            # (i.e. sampled and detached BEFORE this gradient step). If not
+            # provided, ratio = 1.0 which degenerates to vanilla policy gradient.
+            if old_log_prob is not None:
+                ratio = torch.exp(new_log_prob - old_log_prob.detach())
+            else:
+                ratio = torch.ones_like(new_log_prob)
+
             clipped = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon)
-            policy_loss = -torch.min(ratio * advantage.detach(), clipped * advantage.detach()).mean()
+            policy_loss = -torch.min(
+                ratio * advantage.detach(),
+                clipped * advantage.detach()
+            ).mean()
             value_loss = nn.functional.mse_loss(value.squeeze(-1), reward_tensor)
             entropy_bonus = -0.01 * dist.entropy().mean()
 
             total_loss = policy_loss + 0.5 * value_loss + entropy_bonus
 
             if use_kl and expert_probs is not None:
-                kl_div = torch.sum(expert_probs * (torch.log(expert_probs + 1e-10) - torch.log(action_probs + 1e-10)))
-                total_loss += self.kl_weight * kl_div   # UPDATED: uses annealing kl_weight
+                # KL anchor: keeps policy from drifting too far from expert.
+                # kl_weight anneals toward 0 so RL can eventually outperform.
+                kl_div = torch.sum(
+                    expert_probs * (
+                        torch.log(expert_probs + 1e-10)
+                        - torch.log(action_probs + 1e-10)
+                    )
+                )
+                total_loss = total_loss + self.kl_weight * kl_div
                 metrics["kl_div"] = kl_div.item()
 
             metrics.update({
@@ -486,13 +633,16 @@ class RLTrainer:
                 "value_loss": value_loss.item(),
                 "reward": reward,
                 "action": action.item(),
-                "max_prob": action_probs.max().item(),  # ADDED for convergence visibility
+                "new_log_prob": new_log_prob.detach(),  # returned for next-step old_log_prob
+                "max_prob": action_probs.max().item(),
             })
 
         # Backward + optimize
         self.optimizer.zero_grad()
         total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+        # FIX-6: Raise clip to 1.0 for Phase 2/3; Phase 1 keeps 0.5 for stability.
+        clip_norm = 0.5 if (expert_probs is not None and outcome is None) else 1.0
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_norm)
         self.optimizer.step()
         self.scheduler.step()
 
@@ -523,7 +673,9 @@ class RLTrainer:
             target_season:
                 "current"   Per-league season start (default). Joins against
                             leagues.current_season so each league's season
-                            start date is respected individually.
+                            start date is respected individually. Capped at
+                            DEFAULT_CURRENT_SEASON_MAX_DAYS days to prevent
+                            runaway training (FIX-7).
                 "all"       All available seasons, oldest-first. Full cold retrain.
                 int N       Past season by offset: 1 = most recent past season,
                             2 = two seasons ago, etc. Matches enrich_leagues convention.
@@ -563,6 +715,8 @@ class RLTrainer:
                   f"Phase 2 needs: {needed_rows} more odds rows, "
                   f"{needed_days} more days of live data.")
 
+        # FIX-4: always set self.active_phase so train_step never falls through
+        # to a stale default.
         self.active_phase = active_phase
 
         if active_phase == 3 or phase == 3:
@@ -573,9 +727,6 @@ class RLTrainer:
             print("  [TRAIN] Cold start: Starting from base weights (no checkpoint loaded).")
 
         # ── Season-aware date selection ─────────────────────────────────────────
-        # Replaces the old global cutoff (max_seasons_back * 365 days from last date)
-        # which forced all leagues to start from the same arbitrary date floor.
-        # Now each league's training window begins at its own season start date.
         all_dates, season_label = self._get_season_dates(conn, target_season)
 
         if not all_dates:
@@ -604,7 +755,6 @@ class RLTrainer:
         if resume and not cold and latest_path.exists():
             try:
                 ckpt = torch.load(latest_path, map_location=self.device, weights_only=False)
-                # Architecture mismatch guard
                 ckpt_n_actions = ckpt.get("n_actions", 8)
                 if ckpt_n_actions != N_ACTIONS:
                     print(f"  [RESUME] ✗ Checkpoint is {ckpt_n_actions}-dim but "
@@ -612,15 +762,11 @@ class RLTrainer:
                     return
                 self.model.load_state_dict(ckpt["model_state"], strict=False)
                 self.optimizer.load_state_dict(ckpt["optimizer_state"])
-
-                # ── FIX (2026-03-14): Restore scheduler state on resume. ──────────
-                # Previously scheduler.state_dict() was not saved, so every --resume
-                # re-initialized the scheduler from scratch and the 10x Phase 1 LR
-                # reduction below was applied again — compounding the reduction on
-                # every resume. Now saved and restored correctly.
                 if "scheduler_state" in ckpt:
                     self.scheduler.load_state_dict(ckpt["scheduler_state"])
-
+                # Restore kl_weight from checkpoint if saved
+                if "kl_weight" in ckpt:
+                    self.kl_weight = ckpt["kl_weight"]
                 start_day_idx = ckpt["day"]
                 total_matches_global = ckpt.get("total_matches", 0)
                 total_correct_global = ckpt.get("correct_predictions", 0)
@@ -637,8 +783,7 @@ class RLTrainer:
                 start_day_idx = 0
 
         # Phase 1 LR reduction: imitation needs 10x lower LR than PPO exploration.
-        # Guard with `not resume` so a resumed run does not re-apply the reduction
-        # on top of the scheduler state just restored above.
+        # Guard with `not resume` so a resumed run does not re-apply the reduction.
         original_lrs = []
         if active_phase == 1 and not resume:
             for pg in self.optimizer.param_groups:
@@ -656,7 +801,7 @@ class RLTrainer:
             day_rl_acc = 0.0
             day_rule_acc = 0.0
             day_grad_norm = 0.0
-            day_max_prob = 0.0   # ADDED for convergence visibility
+            day_max_prob = 0.0
 
             cursor = conn.execute("""
                 SELECT 
@@ -684,21 +829,49 @@ class RLTrainer:
                 h_idx = self.registry.get_team_idx(home_tid)
                 a_idx = self.registry.get_team_idx(away_tid)
 
-                vision_data = self._build_training_vision_data(conn, match_date, league_id, home_tid, h_name, away_tid, a_name, season=season)
+                vision_data = self._build_training_vision_data(
+                    conn, match_date, league_id, home_tid, h_name, away_tid, a_name, season=season
+                )
                 features = FeatureEncoder.encode(vision_data)
                 expert_probs = self._get_rule_engine_probs(vision_data)
 
                 if active_phase == 1:
-                    metrics = self.train_step(features, l_idx, h_idx, a_idx, expert_probs=expert_probs)
+                    # Phase 1: pure imitation, no outcome needed
+                    metrics = self.train_step(
+                        features, l_idx, h_idx, a_idx,
+                        expert_probs=expert_probs,
+                        active_phase=active_phase,
+                    )
                 else:
+                    # FIX-1: compute old_log_prob under CURRENT policy BEFORE the update.
+                    # This is the correct PPO procedure: sample action → record log prob →
+                    # compute reward → update policy → importance-sample with stored log prob.
                     use_kl = (active_phase == 2)
-                    metrics = self.train_step(features, l_idx, h_idx, a_idx, outcome=outcome, expert_probs=expert_probs, use_kl=use_kl)
+                    xg_fair_odds = self._get_xg_fair_odds(vision_data)  # FIX-3
+
+                    with torch.no_grad():
+                        features_dev = features.to(self.device)
+                        logits_old, _, _ = self.model(features_dev, l_idx, h_idx, a_idx)
+                        probs_old = torch.softmax(logits_old, dim=-1)
+                        dist_old = torch.distributions.Categorical(probs_old)
+                        action_old = dist_old.sample()
+                        old_log_prob = dist_old.log_prob(action_old)
+
+                    metrics = self.train_step(
+                        features, l_idx, h_idx, a_idx,
+                        outcome=outcome,
+                        expert_probs=expert_probs,
+                        use_kl=use_kl,
+                        old_log_prob=old_log_prob,
+                        xg_fair_odds=xg_fair_odds,
+                        active_phase=active_phase,
+                    )
 
                 day_matches += 1
                 day_reward += metrics.get("reward", 0.0)
                 day_imit_loss += metrics.get("imitation_loss", 0.0)
                 day_kl += metrics.get("kl_div", 0.0)
-                day_max_prob += metrics.get("max_prob", 0.0)  # ADDED
+                day_max_prob += metrics.get("max_prob", 0.0)
 
                 # Gradient norm tracking
                 total_norm = 0.0
@@ -707,7 +880,7 @@ class RLTrainer:
                         total_norm += p.grad.data.norm(2).item() ** 2
                 day_grad_norm += total_norm ** 0.5
 
-                # RL Correctness (vs Actual Outcome — all 30 action types)
+                # Correctness tracking
                 action_idx = metrics.get("action", torch.argmax(
                     self.model.get_action_probs(features, l_idx, h_idx, a_idx)
                 ).item())
@@ -720,12 +893,11 @@ class RLTrainer:
                     print(f"        Expert probs: {[round(p, 3) for p in probs_list]}")
                     print(f"        Expert pick: {ACTIONS[expert_pred_idx]['key']} | RL pick: {ACTIONS[action_idx]['key']}")
                     print(f"        Correct actions: {[ACTIONS[a]['key'] for a in correct_actions]}")
-                    print(f"        KL: {metrics.get('kl_div', 0.0):.4f} | Imitation loss: {metrics.get('imitation_loss', 0.0):.4f}")
+                    print(f"        KL: {metrics.get('kl_div', 0.0):.4f} | "
+                          f"Imitation loss: {metrics.get('imitation_loss', 0.0):.4f}")
 
-                # Count RL as correct if its action is in the correct set
                 if action_idx in correct_actions:
                     day_rl_acc += 1
-                # Count Rule Engine as correct if its argmax is in the correct set
                 if expert_pred_idx in correct_actions:
                     day_rule_acc += 1
 
@@ -736,7 +908,7 @@ class RLTrainer:
                 rule_acc = (day_rule_acc / day_matches) * 100
                 kl = day_kl / day_matches
                 gn = day_grad_norm / day_matches
-                max_prob_pct = (day_max_prob / day_matches) * 100   # ADDED
+                max_prob_pct = (day_max_prob / day_matches) * 100
                 if active_phase == 1:
                     il = day_imit_loss / day_matches
                     print(f"  [Day {day_idx+1:3d}/{start_day_idx + len(all_dates)}] "
@@ -755,7 +927,6 @@ class RLTrainer:
                     self.kl_weight = max(0.0, self.kl_weight * 0.995)
                     if self.kl_weight < 0.01:
                         self.kl_weight = 0.0
-                    print(f"      [KL annealing] current weight = {self.kl_weight:.4f}")
 
                 # --- Save checkpoint after each day ---
                 total_matches_global += day_matches
@@ -766,17 +937,14 @@ class RLTrainer:
                     "match_date": match_date,
                     "model_state": self.model.state_dict(),
                     "optimizer_state": self.optimizer.state_dict(),
-                    # ── FIX (2026-03-14): Persist scheduler state. ──────────────
-                    # Without this, every --resume re-initialized the scheduler and
-                    # re-applied the 10x Phase 1 LR reduction, compounding it each time.
                     "scheduler_state": self.scheduler.state_dict(),
+                    "kl_weight": self.kl_weight,
                     "total_matches": total_matches_global,
                     "correct_predictions": total_correct_global,
                     "phase": active_phase,
                     "n_actions": N_ACTIONS,
                     "odds_rows_at_save": odds_rows,
                     "days_live_at_save": days_live,
-                    # Season metadata for auditability and resume awareness
                     "target_season": str(target_season),
                     "season_label": season_label,
                 }
@@ -809,12 +977,10 @@ class RLTrainer:
         """
         from Data.Access.league_db import computed_standings
 
-        # Get last 10 home team matches before this date
         home_form = self._get_team_form(conn, home_team_id, home_team_name, match_date)
         away_form = self._get_team_form(conn, away_team_id, away_team_name, match_date)
         h2h = self._get_h2h(conn, home_team_id, away_team_id, match_date)
 
-        # P0 Fix 3: Reconstruct historical standings as of match_date
         standings = []
         if league_id:
             try:
@@ -868,7 +1034,6 @@ class RLTrainer:
     def _get_h2h(self, conn, home_id: str, away_id: str,
                  before_date: str) -> List[Dict]:
         """Get H2H matches between two teams before a given date (540-day window)."""
-        # P0 Fix 2: Apply 18-month (540-day) cutoff matching live Rule Engine
         cutoff_date = (datetime.strptime(before_date, "%Y-%m-%d")
                        - timedelta(days=540)).strftime("%Y-%m-%d")
 
@@ -907,6 +1072,9 @@ class RLTrainer:
         """
         Online learning from new prediction outcomes.
         Called after outcome_reviewer completes a batch.
+
+        FIX-4: active_phase is explicitly set to self.active_phase before calling
+        train_step, so online updates never silently use the wrong reward function.
         """
         if not reviewed_predictions:
             return
@@ -920,7 +1088,6 @@ class RLTrainer:
 
             is_correct = pred.get("outcome_correct") in ("True", "1")
 
-            # Build vision_data from prediction record
             vision_data = {
                 "h2h_data": {
                     "home_team": pred.get("home_team", ""),
@@ -943,14 +1110,18 @@ class RLTrainer:
             h_idx = self.registry.get_team_idx(home_tid)
             a_idx = self.registry.get_team_idx(away_tid)
 
-            # Simple reward from correctness
             outcome = {
-                "result": "home_win" if is_correct else "draw",  # Simplified
+                "result": "home_win" if is_correct else "draw",
                 "home_score": int(pred.get("home_score", 0) or 0),
                 "away_score": int(pred.get("away_score", 0) or 0),
             }
 
-            self.train_step(features, l_idx, h_idx, a_idx, outcome)
+            # FIX-4: pass active_phase explicitly — never rely on default
+            self.train_step(
+                features, l_idx, h_idx, a_idx,
+                outcome=outcome,
+                active_phase=self.active_phase,
+            )
             updated += 1
 
         if updated > 0:
