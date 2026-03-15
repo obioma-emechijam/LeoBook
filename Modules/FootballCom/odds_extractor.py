@@ -7,6 +7,7 @@
 # Called by: Modules/FootballCom/fb_url_resolver.py
 #            (resolve_urls_stable inner fixture loop)
 
+import asyncio
 import json
 import re
 import time
@@ -156,26 +157,33 @@ class OddsExtractor:
                 seen_market_ids.add(market_id)
                 markets_found += 1
 
-                # Scroll into view to trigger lazy-loaded content
+                # Scroll container into view to ensure outcome rows are rendered
                 try:
                     await container.scroll_into_view_if_needed()
+                    await asyncio.sleep(0.3)
                 except Exception:
                     pass
 
-                outcome_items = await container.query_selector_all(
-                    ".m-outcome-item, [class*='m-outcome-item']"
-                )
+                # Real football.com structure (confirmed from booking_harvester.py):
+                # Each outcome is a .m-table-row, containing:
+                #   label: span.un-text-rem-[12px]
+                #   odds:  span.un-text-rem-[14px].un-font-bold
+                outcome_rows = await container.query_selector_all(".m-table-row")
 
                 batch: List[Dict] = []
                 extracted_at = now_ng().isoformat()
 
-                for item in outcome_items:
+                for row in outcome_rows:
                     try:
-                        name_el = await item.query_selector(
-                            ".m-outcome-name, [class*='outcome-name'], .name, span"
+                        # Label: span with the outcome name
+                        name_el = await row.query_selector(
+                            "span.un-text-rem-\\[12px\\], "
+                            "span[class*='un-text-rem'][class*='12']"
                         )
-                        odds_el = await item.query_selector(
-                            ".m-odds-value, .m-price, [class*='odds-value'], [class*='m-price'], [class*='price']"
+                        # Odds: bold span with the decimal value
+                        odds_el = await row.query_selector(
+                            "span.un-text-rem-\\[14px\\].un-font-bold, "
+                            "span.un-font-bold[class*='un-text-rem']"
                         )
                         if not name_el or not odds_el:
                             continue
