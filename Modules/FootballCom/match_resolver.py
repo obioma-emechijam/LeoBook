@@ -329,38 +329,52 @@ class GrokMatcher:
             + '\n\nReply with the index number ONLY of the best match, or -1 if none fits.'
         )
 
-        model_chain = ['gemini-2.0-flash-lite', 'gemini-1.5-flash-8b', 'gemini-2.0-flash']
+        model_chain = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash-8b']
+
+        # Fast-exit: if all models are dead this session, skip entirely
+        if all(m in _session_dead_models for m in model_chain):
+            return fallback_match, fallback_score
+
+        api_key = os.environ.get('GEMINI_API_KEY', '')
+        if not api_key:
+            return fallback_match, fallback_score
 
         for model_name in model_chain:
             if model_name in _session_dead_models:
                 continue
-            api_key = os.environ.get('GEMINI_API_KEY', '')
-            if not api_key:
-                break
             try:
                 client = genai.Client(api_key=api_key)
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt_text,
-                    config=types.GenerateContentConfig(
-                        temperature=0.0,
-                        max_output_tokens=10,
+                # Run sync SDK call off the event loop thread
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda mn=model_name: client.models.generate_content(
+                        model=mn,
+                        contents=prompt_text,
+                        config=types.GenerateContentConfig(
+                            temperature=0.0,
+                            max_output_tokens=10,
+                        ),
                     )
                 )
                 answer = (response.text or '').strip()
                 try:
                     i = int(answer)
                     if 0 <= i < len(fb_matches):
-                        cand = fb_matches[i]
-                        return cand, 0.80
+                        return fb_matches[i], 0.80
                 except ValueError:
                     pass
-                break  # Got a response, but it wasn't a valid index — stop trying
+                break  # valid response, wrong format — stop rotating
             except Exception as e:
                 err_str = str(e)
-                if 'quota' in err_str.lower() or '429' in err_str:
+                # Mark dead for ANY non-transient error — stops the 400 flood
+                if any(code in err_str for code in ('400', '403', '404', '429', 'quota', 'invalid api key', 'INVALID_ARGUMENT')):
                     _session_dead_models.add(model_name)
-                elif 'invalid api key' in err_str.lower():
-                    break
+                    if 'invalid api key' in err_str.lower() or '403' in err_str:
+                        break  # key-level failure — no point trying other models
+                else:
+                    # Unknown transient — skip this model but keep others alive
+                    _session_dead_models.add(model_name)
 
         return fallback_match, fallback_score
+

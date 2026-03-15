@@ -151,9 +151,36 @@ class OddsExtractor:
                 except Exception:
                     pass
 
+                # Multi-tier selector cascade — football.com DOM changes frequently
                 outcome_items = await container.query_selector_all(
                     ".outcome-item, [class*='outcome-item']"
                 )
+                if not outcome_items:
+                    # Tier 2: data-outcome buttons
+                    outcome_items = await container.query_selector_all(
+                        "[data-outcome-id], [data-selection-id], button[class*='odd']"
+                    )
+                if not outcome_items:
+                    # Tier 3: any element with a visible numeric odds value
+                    outcome_items = await container.query_selector_all(
+                        "[class*='price'], [class*='odds'], [class*='OddButton'], "
+                        "[class*='betButton'], [class*='selection']"
+                    )
+                if not outcome_items:
+                    # Tier 4: all buttons inside the container (last resort)
+                    outcome_items = await container.query_selector_all("button")
+
+                # If still empty — dump container HTML once so we can update selectors
+                if not outcome_items and markets_found == 1:
+                    try:
+                        html_snippet = await container.inner_html()
+                        print(
+                            f"    [OddsExtractor] DOM SNAPSHOT (market_id={market_id}) — "
+                            f"no outcomes found with any selector tier.\n"
+                            f"    Container HTML (first 600 chars): {html_snippet[:600]}"
+                        )
+                    except Exception:
+                        pass
 
                 batch: List[Dict] = []
                 extracted_at = now_ng().isoformat()
@@ -161,12 +188,39 @@ class OddsExtractor:
                 for item in outcome_items:
                     try:
                         name_el = await item.query_selector(
-                            ".outcome-name, [class*='outcome-name'], .name"
+                            ".outcome-name, [class*='outcome-name'], [class*='outcomeName'], "
+                            ".name, [class*='label'], [class*='selection-name'], span"
                         )
                         odds_el = await item.query_selector(
-                            ".odds, [class*='odds-value'], [class*='price']"
+                            ".odds, [class*='odds-value'], [class*='oddsValue'], "
+                            "[class*='price'], [class*='Price'], strong, b"
                         )
+                        # Fallback: use full item text if both elements missing
                         if not name_el or not odds_el:
+                            full_text = (await item.inner_text()).strip()
+                            # expect format like 'Home\n2.10' or '2.10'
+                            parts = [p.strip() for p in full_text.split() if p.strip()]
+                            numeric = [p for p in parts if re.match(r'^\d+\.\d+$', p)]
+                            labels  = [p for p in parts if not re.match(r'^[\d\.]+$', p)]
+                            if numeric:
+                                try:
+                                    odds_val = float(numeric[-1])
+                                    if odds_val > 1.0:
+                                        batch.append({
+                                            "fixture_id": fixture_id,
+                                            "site_match_id": site_match_id,
+                                            "market_id": market_id,
+                                            "base_market": base_market,
+                                            "category": category,
+                                            "exact_outcome": ' '.join(labels) or 'unknown',
+                                            "line": self._parse_line(' '.join(labels)),
+                                            "odds_value": odds_val,
+                                            "likelihood_pct": likelihood,
+                                            "rank_in_list": rank,
+                                            "extracted_at": extracted_at,
+                                        })
+                                except ValueError:
+                                    pass
                             continue
 
                         name_text = (await name_el.inner_text()).strip()
