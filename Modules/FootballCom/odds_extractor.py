@@ -25,7 +25,7 @@ from Data.Access.league_db import upsert_match_odds_batch
 
 def _load_market_catalogue() -> List[Dict]:
     path = Path(__file__).parent.parent.parent / \
-        "ranked_markets_likelihood_updated_with_team_ou.json"
+        "Data" / "Store" / "ranked_markets_likelihood_updated_with_team_ou.json"
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)

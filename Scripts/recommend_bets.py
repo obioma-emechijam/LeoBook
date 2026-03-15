@@ -39,7 +39,7 @@ def _load_likelihood_map():
     if _LIKELIHOOD_CACHE is not None:
         return _LIKELIHOOD_CACHE
     _LIKELIHOOD_CACHE = {}
-    json_path = os.path.join(project_root, "ranked_markets_likelihood_updated_with_team_ou.json")
+    json_path = os.path.join(project_root, "Data", "Store", "ranked_markets_likelihood_updated_with_team_ou.json")
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
