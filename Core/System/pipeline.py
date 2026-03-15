@@ -175,25 +175,53 @@ async def run_chapter_1_p2(p=None, scheduler: TaskScheduler = None,
 
 
 @AIGOSuite.aigo_retry(max_retries=2, delay=2.0)
-async def run_chapter_1_p3():
-    """Chapter 1 Page 3: Recommendations & Final Sync."""
-    log_state(chapter="Ch1 P3", action="Recommendations & Final Sync")
+async def run_chapter_1_p3(p=None):
+    """Chapter 1 Page 3: Recommendations, Booking Code Harvest & Final Sync."""
+    log_state(chapter="Ch1 P3", action="Recommendations, Booking Harvest & Final Sync")
     try:
         print("\n" + "=" * 60)
-        print("  CHAPTER 1 PAGE 3: Recommendations & Final Sync")
+        print("  CHAPTER 1 PAGE 3: Recommendations & Booking Code Harvest")
         print("=" * 60)
 
-        await get_recommendations(save_to_file=True)
+        # 1. Generate recommendations — sorted by score DESC per date
+        result = await get_recommendations(save_to_file=True)
+        recommendations = result.get("recommendations", []) if result else []
 
+        # 2. Booking code harvest — top 20% per date, no-login session
+        if recommendations and p is not None:
+            from Modules.FootballCom.booker.booking_harvester import (
+                harvest_booking_codes_for_recommendations,
+            )
+            from Data.Access.league_db import init_db
+
+            conn = init_db()
+            codes_harvested = await harvest_booking_codes_for_recommendations(
+                page=p,
+                recommendations=recommendations,
+                conn=conn,
+            )
+            log_audit_event(
+                "CH1_P3_BOOKING",
+                f"Booking codes harvested: {codes_harvested}",
+                status="success" if codes_harvested > 0 else "partial",
+            )
+        else:
+            if p is None:
+                print("  [Ch1 P3] No browser page available — skipping booking harvest.")
+            if not recommendations:
+                print("  [Ch1 P3] No recommendations — skipping booking harvest.")
+
+        # 3. Final sync
         sync_ok = await run_full_sync(session_name="Chapter 1 Final")
         if not sync_ok:
             print("  [AIGO] Sync parity issues detected. Logged for review.")
             log_audit_event("CH1_P3_SYNC", "Sync parity issues detected.", status="partial_failure")
 
-        log_audit_event("CH1_P3", "Recommendations and final sync completed.", status="success")
+        log_audit_event("CH1_P3", "Recommendations and booking harvest completed.", status="success")
     except Exception as e:
         print(f"  [Error] Chapter 1 Page 3 failed: {e}")
         log_audit_event("CH1_P3", f"Failed: {e}", status="failed")
+
 
 
 # ============================================================

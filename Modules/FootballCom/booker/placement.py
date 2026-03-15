@@ -192,90 +192,186 @@ def calculate_kelly_stake(balance: float, odds: float, probability: float = 0.60
     return final_stake
 
 
+# ── Stairway Accumulator Constants ────────────────────────────────────────
+STAIRWAY_ODDS_MIN = 1.20   # Per PROJECT_STAIRWAY.md + user spec
+STAIRWAY_ODDS_MAX = 4.00
+STAIRWAY_TOTAL_MIN = 3.5
+STAIRWAY_TOTAL_MAX = 5.0
+STAIRWAY_MAX_SELECTIONS = 8
+
+
 @AIGOSuite.aigo_retry(max_retries=2, delay=3.0, context_key="fb_match_page", element_key="betslip_place_bet_button")
-async def place_multi_bet_from_codes(page: Page, harvested_matches: List[Dict], current_balance: float) -> bool:
+async def place_stairway_accumulator(
+    page: Page,
+    current_balance: float,
+) -> bool:
     """
-    Chapter 2A (Automated Booking) with AIGO protection.
+    Chapter 2A — Stairway Accumulator Placement.
+
+    Reads predictions with booking_code from SQLite, applies Stairway rules,
+    builds an accumulator via shareCode URLs, and places with stairway stake.
+
+    Stairway rules (from PROJECT_STAIRWAY.md):
+      - Individual odds:  1.20 ≤ odds ≤ 4.00
+      - Total combined:   3.5  ≤ total ≤ 5.0
+      - Max selections:   8, one per match
+      - Stake:            StaircaseTracker().get_current_step_stake()
+      - All matches must complete before step advance
     """
-    # ── Safety Guardrails ──
-    from Core.System.guardrails import run_all_pre_bet_checks, is_dry_run
+    from Core.System.guardrails import run_all_pre_bet_checks, is_dry_run, StaircaseTracker
+    from Data.Access.db_helpers import log_audit_event
+    from Data.Access.league_db import init_db
+
+    # ── Safety guardrails ──────────────────────────────────────────────────
     ok, reason = run_all_pre_bet_checks(balance=current_balance)
     if not ok:
         print(f"    [GUARDRAIL] Bet placement BLOCKED: {reason}")
         log_audit_event("GUARDRAIL_BLOCK", reason, status="blocked")
         return False
-    if is_dry_run():
-        print(f"    [DRY-RUN] Would place {len(harvested_matches)} bets. No real action taken.")
-        log_audit_event("DRY_RUN", f"Simulated {len(harvested_matches)} bets.", status="dry_run")
-        return True
 
-    if not harvested_matches:
-        print("    [Execute] No harvested matches to place.")
+    # ── Load candidates from DB ────────────────────────────────────────────
+    conn = init_db()
+    today = __import__("datetime").date.today().strftime("%d.%m.%Y")
+
+    try:
+        rows = conn.execute(
+            """SELECT fixture_id, home_team, away_team, prediction,
+                      confidence, booking_code, booking_odds, booking_url, date
+               FROM predictions
+               WHERE booking_code IS NOT NULL
+                 AND booking_odds BETWEEN ? AND ?
+                 AND date = ?
+               ORDER BY
+                 CASE confidence
+                   WHEN 'Very High' THEN 1
+                   WHEN 'High'      THEN 2
+                   WHEN 'Medium'    THEN 3
+                   ELSE 4
+                 END ASC,
+                 recommendation_score DESC NULLS LAST""",
+            (STAIRWAY_ODDS_MIN, STAIRWAY_ODDS_MAX, today),
+        ).fetchall()
+    except Exception as e:
+        print(f"    [Stairway] DB query failed: {e}")
         return False
 
-    final_codes = harvested_matches[:12]
-    print(f"\n   [Execute] Starting execution for {len(final_codes)} matches...")
-    
+    if not rows:
+        print(f"    [Stairway] No booking codes available for {today}.")
+        log_audit_event("STAIRWAY_SKIP", f"No candidates for {today}", status="skipped")
+        return False
+
+    columns = [
+        "fixture_id", "home_team", "away_team", "prediction",
+        "confidence", "booking_code", "booking_odds", "booking_url", "date"
+    ]
+    candidates = [dict(zip(columns, r)) for r in rows]
+
+    # ── Greedy accumulator selection ───────────────────────────────────────
+    seen_fixtures = set()
+    accumulator = []
+    total_odds = 1.0
+
+    for c in candidates:
+        if len(accumulator) >= STAIRWAY_MAX_SELECTIONS:
+            break
+        fid = c["fixture_id"]
+        if fid in seen_fixtures:
+            continue  # one selection per match
+        odds = float(c["booking_odds"])
+        projected = total_odds * odds
+        if projected <= STAIRWAY_TOTAL_MAX:
+            accumulator.append(c)
+            total_odds = projected
+            seen_fixtures.add(fid)
+
+    # ── Stairway total odds gate ───────────────────────────────────────────
+    print(f"\n    [Stairway] Accumulator: {len(accumulator)} selections, "
+          f"total odds {total_odds:.2f}")
+    for i, m in enumerate(accumulator, 1):
+        print(f"      {i}. {m['home_team']} vs {m['away_team']} — "
+              f"{m['prediction']} @ {m['booking_odds']:.2f} [{m['confidence']}]")
+
+    if total_odds < STAIRWAY_TOTAL_MIN:
+        msg = (f"Total odds {total_odds:.2f} below Stairway minimum "
+               f"{STAIRWAY_TOTAL_MIN} — not placing today")
+        print(f"    [Stairway] ⚠ {msg}")
+        log_audit_event("STAIRWAY_SKIP", msg, status="below_target")
+        return False
+
+    # ── Dry run ──────────────────────────────────────────────────────────
+    if is_dry_run():
+        print(f"    [DRY-RUN] Would place {len(accumulator)} selections "
+              f"@ total odds {total_odds:.2f}. No real action taken.")
+        log_audit_event("DRY_RUN", f"Stairway accumulator ({len(accumulator)} bets, "
+                        f"odds {total_odds:.2f}).", status="dry_run")
+        return True
+
+    # ── Clear slip ────────────────────────────────────────────────────────
     await force_clear_slip(page)
 
-    # 2. Add via URL
-    for m in final_codes:
-        code = m.get('booking_code')
-        if not code: continue
-        url = f"https://www.football.com/ng/m?shareCode={code}"
-        print(f"    [Execute] Injecting code {code}...")
-        await page.goto(url, timeout=30000, wait_until='domcontentloaded')
+    # ── Load each selection via booking URL ───────────────────────────────
+    for m in accumulator:
+        url = m.get("booking_url") or \
+              f"https://www.football.com/ng/m?shareCode={m['booking_code']}"
+        print(f"    [Stairway] Loading: {url}")
+        await page.goto(url, timeout=30000, wait_until="domcontentloaded")
         await asyncio.sleep(1.5)
 
-    # 3. Verify Count
+    # ── Verify slip count ─────────────────────────────────────────────────
     total_in_slip = await get_bet_slip_count(page)
     if total_in_slip < 1:
-        raise ValueError("Slip is empty after injection.")
+        raise ValueError("Slip is empty after loading all booking URLs.")
+    print(f"    [Stairway] Slip loaded: {total_in_slip} selection(s) in betslip")
 
-    # 4. Calculate Stake
-    total_odds = 1.0
-    total_prob = 1.0
-    for m in final_codes:
-        total_odds *= float(m.get('odds', 1.5))
-        p = CONFIDENCE_TO_PROB.get(m.get('confidence', 'Medium'), 0.50)
-        total_prob *= p
-    
+    # ── Get stairway stake ────────────────────────────────────────────────
+    tracker = StaircaseTracker()
+    stairway_stake = tracker.get_current_step_stake()
     from Core.Utils.constants import CURRENCY_SYMBOL
-    final_stake = calculate_kelly_stake(current_balance, total_odds, probability=max(total_prob, 0.01))
-    print(f"    [Execute] Final Stake: {CURRENCY_SYMBOL}{final_stake}")
+    print(f"    [Stairway] Stake: {CURRENCY_SYMBOL}{stairway_stake:,} "
+          f"(Step {tracker.current_step})")
 
-    # 5. Open Slip Drawer
+    # ── Open slip drawer ──────────────────────────────────────────────────
     slip_trigger = SelectorManager.get_selector_strict("fb_match_page", "slip_trigger_button")
-    await page.locator(slip_trigger).first.click()
+    if slip_trigger:
+        await page.locator(slip_trigger).first.click()
     slip_sel = SelectorManager.get_selector_strict("fb_match_page", "slip_drawer_container")
-    await page.wait_for_selector(slip_sel, state="visible", timeout=15000)
+    if slip_sel:
+        await page.wait_for_selector(slip_sel, state="visible", timeout=15000)
 
-    # 6. Fill Stake
-    amount_input = SelectorManager.get_selector_strict("fb_match_page", "betslip_stake_input")
-    await page.locator(amount_input).first.fill(str(final_stake))
-    await asyncio.sleep(1)
+    # ── Fill stake ────────────────────────────────────────────────────────
+    stake_sel = SelectorManager.get_selector_strict("fb_match_page", "betslip_stake_input")
+    if stake_sel:
+        await page.locator(stake_sel).first.fill(str(stairway_stake))
+        await asyncio.sleep(1)
 
-    # 7. Place and Confirm
+    # ── Place ─────────────────────────────────────────────────────────────
     place_btn = SelectorManager.get_selector_strict("fb_match_page", "betslip_place_bet_button")
     await page.locator(place_btn).first.click(force=True)
     await asyncio.sleep(3)
-    
-    # 8. Success Check
+
+    # ── Confirm balance drop ──────────────────────────────────────────────
     from ..navigator import extract_balance
     new_balance = await extract_balance(page)
-    if new_balance >= (current_balance - (final_stake * 0.5)):
-        raise ValueError("Balance did not decrease sufficiently. Placement likely failed.")
+    expected_max = current_balance - (stairway_stake * 0.9)
+    if new_balance >= expected_max:
+        raise ValueError(
+            f"Balance did not drop enough: before={current_balance:.2f}, "
+            f"after={new_balance:.2f}, stake={stairway_stake}"
+        )
 
-    from Core.Utils.constants import CURRENCY_SYMBOL
-    print(f"    [Execute Success] Multi-bet placed! New Balance: {CURRENCY_SYMBOL}{new_balance:.2f}")
-    
-    # Update Statuses
-    from Data.Access.db_helpers import update_site_match_status, update_prediction_status, log_audit_event
-    for m in final_codes:
-        update_site_match_status(m['site_match_id'], status='booked')
-        if m.get('fixture_id'):
-            update_prediction_status(m['fixture_id'], m['date'], 'booked')
-    
-    log_audit_event("BET_PLACEMENT", f"Multi-bet ({len(final_codes)} matches) placed.", current_balance, new_balance, float(final_stake))
+    print(f"    [Stairway] ✓ Placed! New balance: "
+          f"{CURRENCY_SYMBOL}{new_balance:,.2f}")
+
+    # ── Update statuses ───────────────────────────────────────────────────
+    for m in accumulator:
+        update_prediction_status(m["fixture_id"], m["date"], "booked")
+
+    log_audit_event(
+        "STAIRWAY_PLACED",
+        f"Accumulator placed: {len(accumulator)} bets, "
+        f"total odds {total_odds:.2f}, stake {CURRENCY_SYMBOL}{stairway_stake}",
+        current_balance,
+        new_balance,
+        float(stairway_stake),
+    )
     return True
-
