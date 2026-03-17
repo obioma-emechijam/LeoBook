@@ -146,7 +146,7 @@ async def extract_league_matches(page: Page, target_date: str = None, target_lea
     """Iterates leagues and extracts matches with AIGO protection and hydration support."""
     if fb_url:
         print(f"    [Extractor] Navigating to {fb_url}...")
-        await page.goto(fb_url, wait_until='networkidle', timeout=30000)
+        await page.goto(fb_url, wait_until='networkidle', timeout=60000)
     
     current_url = page.url
     print(f"  [Harvest] Sequence for {target_league_name or 'league'} -> {current_url}")
