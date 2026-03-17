@@ -312,6 +312,7 @@ async def _league_worker(
             await page.set_viewport_size({"width": 500, "height": 640})
 
             print(f"\n  [League] {league_name} ({len(fs_fixtures)} fixtures) → {fb_url}")
+            
 
             first_date = fs_fixtures[0].get('date', '') if fs_fixtures else ''
             all_page_matches = await extract_league_matches(

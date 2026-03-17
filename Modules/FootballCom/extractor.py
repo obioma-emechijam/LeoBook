@@ -147,6 +147,7 @@ async def extract_league_matches(page: Page, target_date: str = None, target_lea
     if fb_url:
         print(f"    [Extractor] Navigating to {fb_url}...")
         await page.goto(fb_url, wait_until='domcontentloaded', timeout=30000)
+        await asyncio.sleep(2)
     
     current_url = page.url
     print(f"  [Harvest] Sequence for {target_league_name or 'league'} -> {current_url}")
