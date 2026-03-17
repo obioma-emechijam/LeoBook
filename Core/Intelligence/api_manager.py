@@ -74,7 +74,7 @@ async def grok_api_call(prompt_content, generation_config=None, **kwargs):
         }
     ]
     payload = {
-        "model": "grok-beta",
+        "model": "grok-4.20-beta-0309-reasoning",  # FIX: grok-beta was deprecated; use current fast-reasoning model
         "messages": messages_list,
         "temperature": temperature,
         "max_tokens": 4096,

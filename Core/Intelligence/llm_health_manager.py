@@ -59,7 +59,7 @@ class LLMHealthManager:
     PING_MODEL = "gemini-3.1-flash-lite-preview"
     GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
     GROK_API_URL = "https://api.x.ai/v1/chat/completions"
-    GROK_MODEL = "grok-beta"
+    GROK_MODEL = "grok-4.20-beta-0309-reasoning"  # FIX: grok-beta deprecated on xAI API
 
     def __new__(cls):
         if cls._instance is None:
@@ -390,7 +390,9 @@ class LLMHealthManager:
             try:
                 resp = requests.post(api_url, headers=headers, json=payload, timeout=10)
                 if resp.status_code in (401, 403) or (resp.status_code == 400 and "INVALID_ARGUMENT" in resp.text):
-                    return "FATAL"
+                    return "FATAL"  # Permanent key error
+                if resp.status_code == 404:
+                    return "FAIL"  # FIX: wrong model name — treat as transient, don't nuke the key
                 return "OK" if resp.status_code in (200, 429) else "FAIL"
             except Exception:
                 return "FAIL"

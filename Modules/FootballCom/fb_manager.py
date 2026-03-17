@@ -160,6 +160,10 @@ async def _odds_worker(
     """
     Semaphore-bounded odds extractor worker.
     Opens its own page, extracts, closes page.
+
+    FIX 3 (2026-03-17): Added retry loop (3 attempts, base 2s backoff) when
+    outcomes_extracted == 0. Collapsed accordion containers occasionally require
+    a full page reload + re-extraction to yield rows after the expand click.
     """
     async with sem:
         odds_page = None
@@ -181,8 +185,30 @@ async def _odds_worker(
             )
             await asyncio.sleep(1.5)
 
-            extractor = OddsExtractor(odds_page, conn)
-            result = await extractor.extract(fixture_id, site_id)
+            result: Optional[OddsResult] = None
+            # Retry loop: up to 3 attempts if 0 outcomes extracted
+            for attempt in range(3):
+                extractor = OddsExtractor(odds_page, conn)
+                result = await extractor.extract(fixture_id, site_id)
+
+                if result.outcomes_extracted > 0:
+                    break  # Success — all done
+
+                if attempt < 2:
+                    delay = 2 * (attempt + 1)  # 2s, 4s
+                    print(
+                        f"    [Odds] {fixture_id}: 0 outcomes on attempt {attempt + 1}/3. "
+                        f"Reloading page in {delay}s..."
+                    )
+                    await asyncio.sleep(delay)
+                    try:
+                        await odds_page.reload(
+                            wait_until="domcontentloaded", timeout=25000
+                        )
+                        await asyncio.sleep(1.5)
+                    except Exception as reload_err:
+                        print(f"    [Odds] {fixture_id}: reload failed: {reload_err}")
+                        break
 
             print(
                 f"    [Odds] {fixture_id} -> "

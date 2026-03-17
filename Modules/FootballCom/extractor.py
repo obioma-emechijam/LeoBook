@@ -33,14 +33,32 @@ async def _activate_and_wait_for_matches(
     """
     from Modules.Flashscore.fs_league_hydration import _scroll_to_load
 
-    # Football.com match card selector (non-skeleton only)
-    CARD_SEL = (
-        "section.match-card:not(.skeleton), "
-        "div.match-card:not(.skeleton), "
-        "[class*='match-card']:not([class*='skeleton'])"
-    )
+    # ── FIX 5 (2026-03-17): networkidle wait before empty-check ──────────────────
+    # Previously the NO_DATA_SELECTORS check ran immediately after domcontentloaded,
+    # which fires before lazy-loaded match cards are injected. This caused the function
+    # to return False ("no matches") during transient loading states.
+    # Now we wait for networkidle (≤10s) so JS has finished fetching match data,
+    # then dismiss any loading spinners, THEN check for empty-page indicators.
+    try:
+        await page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        pass  # Timeout is acceptable — proceed with whatever is loaded
 
-    # Phase 0: early exit — "No upcoming games" indicators
+    # Dismiss loading spinners before checking for content
+    SPINNER_SELECTORS = [
+        "[data-loading]", "[class*='loading']", "[class*='spinner']",
+        "[class*='skeleton']", "[aria-busy='true']",
+    ]
+    for spinner_sel in SPINNER_SELECTORS:
+        try:
+            await page.wait_for_selector(
+                f":not({spinner_sel})", timeout=5000
+            )
+            break
+        except Exception:
+            pass
+
+    # Phase 0: early exit only after page is fully loaded
     NO_DATA_SELECTORS = [
         ".match-card-error-message",
         ".flex-column.no-data",

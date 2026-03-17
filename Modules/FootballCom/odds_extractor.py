@@ -157,10 +157,52 @@ class OddsExtractor:
                 seen_market_ids.add(market_id)
                 markets_found += 1
 
-                # Scroll container into view to ensure outcome rows are rendered
+                # ── FIX 2 (2026-03-17): Expand collapsed accordion before reading rows ──────
+                # football.com renders all [data-market-id] containers in the DOM but keeps
+                # most collapsed by default. Rows are present in the DOM but have 0 height
+                # / display:none. We must click the header/toggle to expand BEFORE querying
+                # .m-table-row, otherwise all rows return empty inner_text() and are skipped.
                 try:
                     await container.scroll_into_view_if_needed()
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(0.15)
+
+                    # Detect collapsed state via aria-expanded, CSS class, or hidden children
+                    is_collapsed = await container.evaluate("""(el) => {
+                        // Check header aria-expanded
+                        const hdr = el.querySelector(
+                            '[aria-expanded="false"], .collapsed, [class*="collapsed"]'
+                        );
+                        if (hdr) return true;
+                        // Fallback: check if first row is hidden
+                        const firstRow = el.querySelector('.m-table-row');
+                        if (!firstRow) return true;
+                        const style = window.getComputedStyle(firstRow);
+                        return style.display === 'none' || style.visibility === 'hidden'
+                            || parseFloat(style.height || '1') < 1;
+                    }""")
+
+                    if is_collapsed:
+                        toggle = await container.query_selector(
+                            ".market-header, [class*='market-header'], "
+                            "[class*='expand'], [class*='accordion-toggle'], "
+                            "[class*='header']:not([class*='page']), "
+                            "[data-toggle], [aria-expanded]"
+                        )
+                        target = toggle or container
+                        try:
+                            await target.click(force=True)
+                        except Exception:
+                            await container.evaluate("el => el.click()")
+                        # Wait for at least one row to become visible (up to 1.5s)
+                        try:
+                            await self.page.wait_for_selector(
+                                f"[data-market-id='{market_id}'] .m-table-row",
+                                state="visible",
+                                timeout=1500,
+                            )
+                        except Exception:
+                            pass  # Proceed anyway — might still have rows
+                        await asyncio.sleep(0.2)
                 except Exception:
                     pass
 
