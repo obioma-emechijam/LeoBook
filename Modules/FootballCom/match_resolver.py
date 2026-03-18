@@ -97,8 +97,18 @@ class GrokMatcher:
 
 
     # ───────────────────────────────────────────────────────────────────────────
-    # Stage 0: SQL matching engine
+    # Stage 0: Direct schedules lookup (no RPC, no VIEW)
+    #   Match on: league_id + date (±1 day) + normalized home + normalized away
     # ───────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _normalize(name: str) -> str:
+        """Lightweight Python equivalent of normalize_team_name()."""
+        import re
+        name = name.strip().lower()
+        name = re.sub(r'[^a-z0-9 ]', '', name)  # strip accents/punctuation
+        name = re.sub(r'\s+', ' ', name).strip()
+        return name
 
     async def resolve_via_sql(
         self,
@@ -106,56 +116,127 @@ class GrokMatcher:
         fb_match_row: Optional[Dict] = None,
     ) -> Tuple[Optional[Dict], int, str]:
         """
-        Call match_fb_to_schedule(p_site_match_id) Supabase RPC.
-        Returns (enriched_fb_row, confidence_int, 'sql_v1.2') or (None, 0, 'sql_miss').
-
-        If Supabase is unavailable or RPC fails, returns (None, 0, 'sql_skip').
+        Query schedules directly for an exact match on:
+          league_id + date (±1 day) + home_team + away_team (both normalized).
+        Returns (enriched_fb_row, confidence_int, 'sql_v2.0') or (None, 0, 'sql_miss').
         """
-        if not self._supabase or not HAS_SUPABASE:
+        if not self._supabase or not HAS_SUPABASE or not fb_match_row:
             return None, 0, 'sql_skip'
+
+        league_id = fb_match_row.get('league_id') or ''
+        fb_date = fb_match_row.get('date') or ''
+        fb_home = fb_match_row.get('home_team') or ''
+        fb_away = fb_match_row.get('away_team') or ''
+
+        if not league_id or not fb_date or not fb_home or not fb_away:
+            return None, 0, 'sql_skip'
+
         try:
+            # Query schedules: exact league_id + date
             result = await asyncio.to_thread(
-                lambda: self._supabase.rpc(
-                    'match_fb_to_schedule',
-                    {'p_site_match_id': site_match_id}
-                ).execute()
+                lambda: self._supabase
+                    .from_('schedules')
+                    .select('fixture_id, date, home_team, away_team, home_team_id, away_team_id')
+                    .eq('league_id', league_id)
+                    .eq('date', fb_date)
+                    .execute()
             )
             rows = result.data or []
-            if not rows:
-                return None, 0, 'sql_miss'
-            best = rows[0]  # Already ordered by confidence DESC in RPC
-            confidence = int(best.get('confidence', 0))
-            if confidence < SQL_CONFIDENCE_THRESHOLD:
-                return None, confidence, 'sql_low_confidence'
 
-            # Merge SQL result into fb_match_row dict for downstream compatibility
-            enriched = dict(fb_match_row or {})
-            enriched['fixture_id']   = best.get('fixture_id')
+            # Normalize and match both home AND away
+            fb_h_norm = self._normalize(fb_home)
+            fb_a_norm = self._normalize(fb_away)
+
+            best = None
+            for row in rows:
+                s_h_norm = self._normalize(row.get('home_team', ''))
+                s_a_norm = self._normalize(row.get('away_team', ''))
+                if s_h_norm == fb_h_norm and s_a_norm == fb_a_norm:
+                    best = row
+                    break
+
+            # Fallback: try date ±1 day if exact date had no match
+            if not best:
+                from datetime import datetime, timedelta
+                try:
+                    d = datetime.strptime(fb_date, '%Y-%m-%d')
+                except ValueError:
+                    return None, 0, 'sql_miss'
+
+                for delta in (-1, 1):
+                    alt_date = (d + timedelta(days=delta)).strftime('%Y-%m-%d')
+                    alt_result = await asyncio.to_thread(
+                        lambda ad=alt_date: self._supabase
+                            .from_('schedules')
+                            .select('fixture_id, date, home_team, away_team, home_team_id, away_team_id')
+                            .eq('league_id', league_id)
+                            .eq('date', ad)
+                            .execute()
+                    )
+                    for row in (alt_result.data or []):
+                        s_h_norm = self._normalize(row.get('home_team', ''))
+                        s_a_norm = self._normalize(row.get('away_team', ''))
+                        if s_h_norm == fb_h_norm and s_a_norm == fb_a_norm:
+                            best = row
+                            break
+                    if best:
+                        break
+
+            if not best:
+                return None, 0, 'sql_miss'
+
+            confidence = 100 if best.get('date') == fb_date else 90
+            enriched = dict(fb_match_row)
+            enriched['fixture_id']   = best['fixture_id']
             enriched['home_team_id'] = best.get('home_team_id')
             enriched['away_team_id'] = best.get('away_team_id')
-            enriched['matched']      = 'sql_v1.2'
-            return enriched, confidence, 'sql_v1.2'
+            enriched['matched']      = 'sql_v2.0'
+
+            # Immediately write fixture_id back to fb_matches
+            try:
+                await asyncio.to_thread(
+                    lambda: self._supabase
+                        .from_('fb_matches')
+                        .update({'fixture_id': best['fixture_id'], 'matched': 'sql_v2.0'})
+                        .eq('site_match_id', site_match_id)
+                        .execute()
+                )
+            except Exception:
+                pass  # Non-critical — enriched dict still has the fixture_id
+
+            return enriched, confidence, 'sql_v2.0'
         except Exception as e:
-            print(f"    [Resolver] SQL RPC failed for {site_match_id}: {e}")
+            print(f"    [Resolver] Direct SQL failed for {site_match_id}: {e}")
             return None, 0, 'sql_error'
 
-    @staticmethod
-    async def auto_match_batch() -> int:
+    async def auto_match_batch(self) -> int:
         """
-        Call auto_match_fb_matches() Supabase RPC to bulk-resolve all unmatched
-        fb_matches in one Postgres pass. Returns count of newly matched rows.
-        Call this after a full harvest run before the prediction pipeline.
+        Fetch all unmatched fb_matches, resolve each against schedules inline,
+        and write fixture_id back immediately. No RPC or VIEW needed.
         """
-        if not HAS_SUPABASE:
+        if not self._supabase or not HAS_SUPABASE:
             return 0
         try:
-            supabase = _get_supabase()
             result = await asyncio.to_thread(
-                lambda: supabase.rpc('auto_match_fb_matches').execute()
+                lambda: self._supabase
+                    .from_('fb_matches')
+                    .select('site_match_id, league_id, date, home_team, away_team')
+                    .or_('fixture_id.is.null,matched.is.null,matched.eq.false')
+                    .limit(500)
+                    .execute()
             )
-            count = result.data or 0
-            print(f"    [Resolver] auto_match_batch: {count} fb_matches newly resolved via SQL.")
-            return int(count)
+            unmatched = result.data or []
+            if not unmatched:
+                return 0
+
+            count = 0
+            for row in unmatched:
+                _, conf, method = await self.resolve_via_sql(row['site_match_id'], row)
+                if conf >= 90:
+                    count += 1
+
+            print(f"    [Resolver] auto_match_batch: {count}/{len(unmatched)} resolved inline.")
+            return count
         except Exception as e:
             print(f"    [Resolver] auto_match_batch failed: {e}")
             return 0
