@@ -282,8 +282,10 @@ class _MatchCardState extends State<MatchCard> {
                             ],
                           ),
                         ),
-                        SizedBox(width: Responsive.sp(context, 4)),
-                        _OddsBox(match: match, isFinished: isFinished),
+                        if (match.odds != null && match.odds!.isNotEmpty) ...[
+                          SizedBox(width: Responsive.sp(context, 4)),
+                          _OddsBox(match: match, isFinished: isFinished),
+                        ],
                       ],
                     ),
                   ),

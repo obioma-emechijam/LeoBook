@@ -108,9 +108,39 @@ class MatchSorter {
     return matches.where((m) => m.isFinished).toList();
   }
 
-  /// SCHEDULED: not live AND not finished (includes postponed/cancelled/fro)
+  /// SCHEDULED: not live AND not finished AND match time is strictly in the future
   static List<MatchModel> _filterScheduledMatches(List<MatchModel> matches) {
-    return matches.where((m) => !m.isLive && !m.isFinished).toList();
+    final now = DateTime.now();
+    return matches.where((m) {
+      if (m.isLive || m.isFinished) return false;
+      // Parse date + time to filter out past matches
+      try {
+        final dateParts = m.date.contains('-')
+            ? m.date.split('-') // YYYY-MM-DD
+            : m.date.split('.'); // DD.MM.YYYY
+        final timeParts = m.time.split(':');
+        if (dateParts.length >= 3 && timeParts.length >= 2) {
+          final int year, month, day;
+          if (m.date.contains('-')) {
+            year = int.parse(dateParts[0]);
+            month = int.parse(dateParts[1]);
+            day = int.parse(dateParts[2]);
+          } else {
+            day = int.parse(dateParts[0]);
+            month = int.parse(dateParts[1]);
+            year = int.parse(dateParts[2]);
+          }
+          final matchDt = DateTime(
+            year, month, day,
+            int.parse(timeParts[0]),
+            int.parse(timeParts[1]),
+          );
+          return matchDt.isAfter(now);
+        }
+      } catch (_) {}
+      // If we can't parse the date/time, keep the match (don't hide it)
+      return true;
+    }).toList();
   }
 }
 

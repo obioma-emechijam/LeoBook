@@ -43,24 +43,51 @@ EXTRACT_MATCHES_JS = r"""(ctx) => {
         if (timeEl) {
             const stageInTime = timeEl.querySelector(`${s.match_stage_block}, ${s.match_stage_pkv}, ${s.match_stage}`);
             if (stageInTime) extraTag = stageInTime.innerText.trim();
+            // Strategy: collect text from (1) text nodes, (2) lineThrough spans, (3) full innerText
             let raw = '';
             for (const node of timeEl.childNodes) {
                 if (node.nodeType === 3) raw += node.textContent;
                 else if (node.classList && node.classList.contains('lineThrough')) raw += node.textContent;
             }
             raw = raw.trim();
-            if (!raw) raw = timeEl.innerText.trim().replace(/FRO|Postp\.?|Canc\.?|Abn\.?/gi, '').trim();
+            // Fallback: if text-node scan yielded nothing useful, use full innerText
+            if (!raw || !raw.match(/\d/)) {
+                raw = timeEl.innerText.trim().replace(/FRO|Postp\.?|Canc\.?|Abn\.?/gi, '').trim();
+            }
+            // Pattern 1: Full date+time  "19.03.2026 14:00"
             const fullM = raw.match(/(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})/);
             if (fullM) {
                 matchDate = `${fullM[3]}-${fullM[2]}-${fullM[1]}`; matchTime = `${fullM[4]}:${fullM[5]}`;
             } else {
+                // Pattern 2: Short date+time  "19.03. 14:00"
                 const shortM = raw.match(/(\d{2})\.(\d{2})\.\s*(\d{2}):(\d{2})/);
                 if (shortM) {
                     const year = inferYear(parseInt(shortM[1]), parseInt(shortM[2]));
                     matchDate = `${year}-${shortM[2]}-${shortM[1]}`; matchTime = `${shortM[3]}:${shortM[4]}`;
                 } else {
+                    // Pattern 3: Time only  "14:00" (today's matches)
                     const jt = raw.match(/(\d{2}):(\d{2})/);
                     if (jt) matchTime = `${jt[1]}:${jt[2]}`;
+                }
+            }
+            // Ultimate fallback: scan ALL descendant text for a time pattern
+            if (!matchTime) {
+                const allText = timeEl.innerText || '';
+                const tf = allText.match(/(\d{2}):(\d{2})/);
+                if (tf) matchTime = `${tf[1]}:${tf[2]}`;
+            }
+            // Also try to extract date from innerText if we got time but no date
+            if (matchTime && !matchDate) {
+                const allText = timeEl.innerText || '';
+                const df = allText.match(/(\d{2})\.(\d{2})\.(\d{4})/);
+                if (df) {
+                    matchDate = `${df[3]}-${df[2]}-${df[1]}`;
+                } else {
+                    const dsf = allText.match(/(\d{2})\.(\d{2})\./);
+                    if (dsf) {
+                        const year = inferYear(parseInt(dsf[1]), parseInt(dsf[2]));
+                        matchDate = `${year}-${dsf[2]}-${dsf[1]}`;
+                    }
                 }
             }
         }
