@@ -137,18 +137,9 @@ def _slugify(name: str) -> str:
     return re.sub(r'[^a-z0-9_]', '_', name.lower().strip())[:80]
 
 
-def _build_public_url(client, bucket: str, remote_name: str) -> Optional[str]:
+def _build_public_url(supabase_url: str, bucket: str, remote_name: str) -> str:
     """Construct the public Supabase Storage URL for an uploaded file."""
-    try:
-        result = client.storage.from_(bucket).get_public_url(remote_name)
-        if isinstance(result, str):
-            return result
-        if isinstance(result, dict):
-            return result.get("publicURL") or result.get("publicUrl")
-    except Exception as e:
-        logger.warning("[Assets] Could not build public URL for %s/%s: %s",
-                       bucket, remote_name, e)
-    return None
+    return f"{supabase_url}/storage/v1/object/public/{bucket}/{remote_name}"
 
 
 def sync_team_assets(limit: Optional[int] = None):
@@ -204,13 +195,13 @@ def sync_team_assets(limit: Optional[int] = None):
 
         result = upload_to_supabase(storage, "team-crests", local_path, remote_name)
         if result:
-            supabase_url = _build_public_url(client, "team-crests", remote_name)
-            if supabase_url:
-                conn.execute(
-                    "UPDATE teams SET crest = ? WHERE team_id = ?",
-                    (supabase_url, team_id)
-                )
-                synced += 1
+            supabase_url_base = os.getenv("SUPABASE_URL", "").rstrip("/")
+            public_url = _build_public_url(supabase_url_base, "team-crests", remote_name)
+            conn.execute(
+                "UPDATE teams SET crest = ? WHERE team_id = ?",
+                (public_url, team_id)
+            )
+            synced += 1
 
     conn.commit()
     logger.info(f"[Assets] Team crests synced: {synced}/{len(rows)}")
@@ -273,13 +264,13 @@ def sync_league_assets(limit: Optional[int] = None):
 
         result = upload_to_supabase(storage, "league-crests", local_path, remote_name)
         if result:
-            supabase_url = _build_public_url(client, "league-crests", remote_name)
-            if supabase_url:
-                conn.execute(
-                    "UPDATE leagues SET crest = ? WHERE league_id = ?",
-                    (supabase_url, league_id)
-                )
-                synced += 1
+            supabase_url_base = os.getenv("SUPABASE_URL", "").rstrip("/")
+            public_url = _build_public_url(supabase_url_base, "league-crests", remote_name)
+            conn.execute(
+                "UPDATE leagues SET crest = ? WHERE league_id = ?",
+                (public_url, league_id)
+            )
+            synced += 1
 
     conn.commit()
     logger.info(f"[Assets] League crests synced: {synced}/{len(rows)}")
@@ -368,7 +359,7 @@ def sync_region_flags(limit: Optional[int] = None):
 
         # ── Locate local SVG ─────────────────────────────────────────────
         # flag-icons-main uses 4x3 aspect ratio for league/country flags
-        svg_path = FLAG_ICONS_DIR / "flags" / "4x3" / f"{iso_code}.svg"
+        svg_path = FLAG_ICONS_DIR / "4x3" / f"{iso_code}.svg"
 
         if not svg_path.exists():
             not_found.append(f"{league_id} ({iso_code})")
@@ -376,16 +367,14 @@ def sync_region_flags(limit: Optional[int] = None):
             continue
 
         # ── Upload SVG (deduplicated — upload each ISO code only once) ────
-        remote_name = f"{iso_code}.svg"
-        if iso_code not in uploaded_svgs:
+        remote_name = f"4x3/{iso_code}.svg"
+        if f"4x3/{iso_code}" not in uploaded_svgs:
             result = upload_to_supabase(storage, "flags", svg_path, remote_name)
             if result:
-                uploaded_svgs.add(iso_code)
+                uploaded_svgs.add(f"4x3/{iso_code}")
 
         # ── Build public URL and write to SQLite ──────────────────────────
-        public_url = (
-            f"{supabase_url}/storage/v1/object/public/flags/{remote_name}"
-        )
+        public_url = _build_public_url(supabase_url, "flags", remote_name)
 
         conn.execute(
             "UPDATE leagues SET region_flag = ?, last_updated = ? WHERE league_id = ?",
@@ -406,6 +395,9 @@ def sync_region_flags(limit: Optional[int] = None):
         len(uploaded_svgs), updated_leagues, skipped
     )
 
+    # ── Also sync flags for countries table ────────────────────────────────
+    sync_country_flags(conn, client, uploaded_svgs)
+
     if not_found:
         logger.warning(
             "[!] SVG not found locally for %d leagues: %s",
@@ -419,6 +411,41 @@ def sync_region_flags(limit: Optional[int] = None):
     if not_found:
         print(f"  [Flags] {len(not_found)} SVG files missing locally")
     print(f"  [Flags] Run --sync to push region_flag values to Supabase table")
+
+
+def sync_country_flags(conn, client, uploaded_cache: set):
+    """Sync 1x1 and 4x3 flags for the countries table."""
+    storage = client.storage
+    supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    
+    rows = conn.execute("SELECT code, name FROM countries").fetchall()
+    logger.info(f"[*] Syncing flags for {len(rows)} countries...")
+    
+    updated_count = 0
+    for row in rows:
+        code = row["code"].lower()
+        
+        urls = {}
+        for ratio in ["1x1", "4x3"]:
+            remote_name = f"{ratio}/{code}.svg"
+            local_path = FLAG_ICONS_DIR / ratio / f"{code}.svg"
+            
+            if local_path.exists():
+                if remote_name not in uploaded_cache:
+                    result = upload_to_supabase(storage, "flags", local_path, remote_name)
+                    if result:
+                        uploaded_cache.add(remote_name)
+                
+                urls[f"flag_{ratio}"] = _build_public_url(supabase_url, "flags", remote_name)
+        
+        if urls:
+            set_clause = ", ".join([f"{k} = ?" for k in urls.keys()])
+            params = list(urls.values()) + [row["code"]]
+            conn.execute(f"UPDATE countries SET {set_clause} WHERE code = ?", params)
+            updated_count += 1
+            
+    conn.commit()
+    logger.info(f"[✓] Country flags updated: {updated_count}/{len(rows)}")
 
 
 if __name__ == "__main__":
