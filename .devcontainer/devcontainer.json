@@ -16,7 +16,9 @@
   "remoteUser": "vscode",
   "remoteEnv": {
     "PYTHONDONTWRITEBYTECODE": "1",
-    "PYTHONUNBUFFERED": "1"
+    "PYTHONUNBUFFERED": "1",
+    "ANDROID_HOME": "/home/vscode/android-sdk",
+    "PATH": "/home/vscode/flutter/bin:/home/vscode/android-sdk/cmdline-tools/latest/bin:/home/vscode/android-sdk/platform-tools:${containerEnv:PATH}"
   },
   "customizations": {
     "vscode": {
@@ -37,6 +39,5 @@
     }
   },
   "forwardPorts": [8000, 8080, 3000, 5000],
-  "postCreateCommand": "bash .devcontainer/setup.sh",
-  "postStartCommand": "source /etc/profile.d/leobook-env.sh 2>/dev/null || true"
-}
+  "postCreateCommand": "bash .devcontainer/setup.sh"
+}
