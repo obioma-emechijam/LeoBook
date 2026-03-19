@@ -266,6 +266,11 @@ async def run_predictions(conn=None, fixtures: List[Dict] = None, scheduler=None
             # Run symbolic prediction
             rule_prediction = RuleEngine.analyze(vision_data)
 
+            # --- Semantic Rule Engine Upgrade ---
+            from Core.Intelligence.rule_engine_manager import SemanticRuleEngine
+            engine = SemanticRuleEngine()
+            rule_output = engine.choose_market(fixture, rule_prediction.get("xg_home", 0.0), rule_prediction.get("xg_away", 0.0))
+
             # Run neural prediction
             rl_predictor = RLPredictor.get_instance()
             rl_prediction = rl_predictor.predict(
@@ -295,6 +300,8 @@ async def run_predictions(conn=None, fixtures: List[Dict] = None, scheduler=None
             prediction["ensemble_path"] = merged["path"]
             prediction["ensemble_weights"] = merged["weights"]
             prediction["market_reliability"] = round(merged["confidence"] * 100, 1)
+            prediction["rule_explanation"] = rule_output["explanation"]
+            prediction["override_reason"] = rule_output.get("override_reason")
 
             # Update confidence label based on merged confidence
             conf = merged["confidence"]
