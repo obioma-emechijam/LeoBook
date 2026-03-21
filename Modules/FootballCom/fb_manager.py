@@ -60,6 +60,86 @@ def _save_checkpoint(batch_idx: int) -> None:
     )
 
 
+from .league_calendar_extractor import extract_league_calendar, build_league_calendar_url
+
+async def run_league_calendar_fixtures_sync(playwright: Playwright, league_ids: Optional[List[str]] = None):
+    """
+    Phase 0: Fixture Discovery via League Hub Calendars.
+    Navigates to the calendar page of each mapped league and extracts all matches.
+    Saves results to the fb_matches table to seed resolution.
+    """
+    print("\n--- Running League Calendar Fixture Sync (Phase 0) ---")
+    
+    fb_lookup = _load_fb_league_lookup()
+    if not fb_lookup:
+        print("  [Warning] No fb_url mappings found. Skipping calendar sync.")
+        return
+
+    # Filter by league_ids if provided
+    to_sync = {lid: entry for lid, entry in fb_lookup.items() if not league_ids or lid in league_ids}
+    if not to_sync:
+        print("  [Info] No leagues to sync calendar for.")
+        return
+
+    print(f"  [Calendar] Syncing {len(to_sync)} league hub calendars...")
+
+    # Auto-detect headless: Codespaces / CI have no display
+    is_headless = os.getenv("CODESPACES") == "true" or (os.name != "nt" and not os.environ.get("DISPLAY"))
+
+    async with await playwright.chromium.launch(headless=is_headless) as browser:
+        # Use a fresh context for fixture discovery (no login/state needed)
+        context = await browser.new_context(
+            user_agent=FB_MOBILE_USER_AGENT,
+            viewport=FB_MOBILE_VIEWPORT
+        )
+        page = await context.new_page()
+        
+        total_discovered = 0
+        for lid, entry in to_sync.items():
+            country = entry.get('fb_country')
+            league_name = entry.get('fb_league_name')
+            
+            if not country or not league_name:
+                continue
+                
+            calendar_url = build_league_calendar_url(country, league_name)
+            try:
+                matches = await extract_league_calendar(page, calendar_url)
+                if matches:
+                    # Normalize keys for db_helpers.save_site_matches
+                    normalized = []
+                    for m in matches:
+                        d_str, t_str = "Unknown", "Unknown"
+                        if m.get('date_time') and ' ' in m['date_time']:
+                            d_str, t_str = m['date_time'].split(' ', 1)
+                        
+                        normalized.append({
+                            'home': m.get('home_team'),
+                            'away': m.get('away_team'),
+                            'date': d_str,
+                            'time': t_str,
+                            'league': league_name,
+                            'url': m.get('match_url'),
+                            'status': m.get('status'),
+                            'score': f"{m.get('home_score')}-{m.get('away_score')}" if m.get('home_score') is not None else "N/A"
+                        })
+                    
+                    # Save to fb_matches table
+                    save_site_matches(normalized)
+                    total_discovered += len(normalized)
+                    print(f"    ✓ {league_name}: {len(normalized)} fixtures saved.")
+                else:
+                    print(f"    ! {league_name}: No fixtures found in calendar.")
+
+            except Exception as e:
+                print(f"    [Error] Failed to sync calendar for {league_name}: {e}")
+                
+        await context.close()
+    
+    print(f"  [Calendar] Sync complete. Total fixtures discovered: {total_discovered}")
+
+
+
 # ── Shared session helpers ──────────────────────────────────────────────
 
 async def _create_session(playwright: Playwright):
@@ -437,6 +517,19 @@ async def run_odds_harvesting(playwright: Playwright):
     print(f"  [Pipeline] {total_fixtures} fixtures across "
           f"{total_leagues} leagues to process "
           f"({total_leagues} page loads, was {total_fixtures}).")
+
+    # -----------------------------------------------------------------------
+    # PHASE 0: Calendar Fixture Discovery
+    # -----------------------------------------------------------------------
+    # If not a dry-run, we perform a multi-league calendar sync first to
+    # find all upcoming fixtures and match IDs from the most complete source.
+    from Core.System.guardrails import is_dry_run
+    if not is_dry_run():
+        try:
+            await run_league_calendar_fixtures_sync(playwright)
+        except Exception as e:
+            print(f"  [Warning] Phase 0 Calendar Sync failed: {e}")
+    # -----------------------------------------------------------------------
 
     # 4. Launch matcher
     matcher = FixtureResolver()

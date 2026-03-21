@@ -1,0 +1,3 @@
+Before i run the live extraction, could you provide evidence based report that shows how Ch1 to Ch 2 currently works step by step and what data is recieved and who is the source, what  is done with the data by whom and why, and then whats the output and who gets it and why. 
+Evidence. All guardrials, checks  and calls must be full investiagte. This is really important as dead codes may still exist in the codebase and without proper code review and execution flow examination, you are bound to produce outdated and dead end code. 
+Also docs are outdated.

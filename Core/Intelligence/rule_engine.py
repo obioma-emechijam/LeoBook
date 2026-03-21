@@ -21,7 +21,7 @@ from .rule_config import RuleConfig
 
 class RuleEngine:
     @staticmethod
-    def analyze(vision_data: Dict[str, Any], config: RuleConfig = None) -> Dict[str, Any]:
+    def analyze(vision_data: Dict[str, Any], config: RuleConfig = None, live_odds: Dict[str, float] = None) -> Dict[str, Any]:
         """
         MAIN PREDICTION ENGINE — Returns full market predictions
         Accepts optional RuleConfig for custom logic.
@@ -63,6 +63,10 @@ class RuleEngine:
                         h2h.append(m)
             except:
                 h2h.append(m)  # keep if date parse fails
+        
+        # Merge live_odds from vision_data if not passed explicitly (backward compatibility)
+        if live_odds is None:
+            live_odds = vision_data.get("real_odds")
 
         # Generate all tags using TagGenerator
         home_tags = TagGenerator.generate_form_tags(home_form, home_team, standings)
@@ -170,7 +174,7 @@ class RuleEngine:
         # --- 30-dim Poisson market predictions (full action space) ---
         raw_scores_dict = {"home": home_score, "draw": draw_score, "away": away_score}
         predictions_30dim = BettingMarkets.generate_30dim_predictions(
-            home_xg, away_xg, raw_scores_dict
+            home_xg, away_xg, raw_scores_dict, live_odds=live_odds
         )
         best_30dim = BettingMarkets.select_best_30dim(predictions_30dim)
 
@@ -252,10 +256,21 @@ class RuleEngine:
         if final_confidence == "Very High": rec_score += 5
         
 
+        # Final Selection Summary
+        final_odds = 1.0
+        if best_30dim and best_30dim.get("ev", 0) > 0:
+            final_odds = best_30dim.get("odds", 1.0)
+        else:
+            # Fallback to the ~10-market prediction's odds if possible
+            # (Note: those older markets are being phased out, but for now we fallback to synthetic)
+            from Core.Intelligence.rl.market_space import SYNTHETIC_ODDS
+            final_odds = SYNTHETIC_ODDS.get(best_prediction.get("market_type", "").lower(), 1.0)
+
         return {
             "market_prediction": prediction_text,
             "type": prediction_text,
             "market_type": best_30dim["market_type"] if best_30dim and best_30dim["ev"] > 0 else best_prediction["market_type"],
+            "odds": final_odds,
             "confidence": final_confidence,
             "recommendation_score": min(rec_score, 100),
             "market_reliability": round(raw_confidence * 100, 1),

@@ -273,11 +273,19 @@ class BettingMarkets:
 
         return format_selection(top, "fallback")
 
+    @staticmethod
+    def _get_odds(market_key: str, live_odds: Dict[str, float], synthetic_odds: Dict[str, float]) -> float:
+        """Return real odds if available, else fall back to synthetic."""
+        if live_odds and market_key in live_odds:
+            return live_odds[market_key]
+        return synthetic_odds.get(market_key, 1.0)
+
     # ── 30-dim Poisson-based market predictions ──────────────
     @staticmethod
     def generate_30dim_predictions(
         home_xg: float, away_xg: float,
         raw_scores: Dict[str, float] = None,
+        live_odds: Dict[str, float] = None
     ) -> Dict[str, Dict[str, Any]]:
         """
         Generate predictions for ALL 30 actions using the Poisson engine
@@ -298,9 +306,13 @@ class BettingMarkets:
                 continue
 
             prob = probs.get(key, 0.0)
-            odds = SYNTHETIC_ODDS.get(key, 0.0)
+            odds = BettingMarkets._get_odds(key, live_odds, SYNTHETIC_ODDS)
             ev = (prob * odds) - 1.0 if odds > 0 else -1.0
-            gated, gate_reason = stairway_gate(key, None, prob)
+            
+            # Note: stairway_gate handles its own synthetic fallback internally for live_odds_val
+            # but we pass live_odds explicitly if available for better gating accuracy.
+            live_odds_val = (live_odds or {}).get(key)
+            gated, gate_reason = stairway_gate(key, live_odds_val, prob)
 
             predictions[key] = {
                 "market_type": action["market"],

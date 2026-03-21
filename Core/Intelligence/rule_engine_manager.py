@@ -35,6 +35,8 @@ class SemanticRuleEngine:
         return {
             "chosen_market": final_market.market_outcome,
             "market_id": final_market.market_id,
+            "outcome": final_market.exact_outcome,
+            "line": final_market.line,
             "statistical_edge": round(best_score * 100, 1),
             "override_reason": override_reason,
             "explanation": f"{final_market.semantic_meaning} (xG {total_xg:.2f}, likelihood {final_market.likelihood_percent}%)"

@@ -127,8 +127,23 @@ def save_prediction(match_data: Dict[str, Any], prediction_result: Dict[str, Any
         'form_fixture_ids': json.dumps(prediction_result.get('form_fixture_ids', [])),
         'standings_snapshot': json.dumps(prediction_result.get('standings_snapshot', [])),
         'league_stage': match_data.get('league_stage', ''),
+        # --- Rule Engine Manager Fields ---
+        'chosen_market': prediction_result.get('chosen_market'),
+        'market_id': prediction_result.get('market_id'),
+        'rule_explanation': prediction_result.get('rule_explanation'),
+        'override_reason': prediction_result.get('override_reason'),
+        'statistical_edge': prediction_result.get('statistical_edge', 0.0),
+        'pure_model_suggestion': prediction_result.get('pure_model_suggestion'),
         'last_updated': dt.now().isoformat(),
     }
+
+    # Step 5: Safety log for non-SKIP predictions with missing odds
+    if not row['odds'] and row['prediction'] != 'SKIP':
+        logger.warning(
+            f"  [DBHelpers] Non-SKIP prediction saved with empty odds | "
+            f"fixture: {row['fixture_id']} | "
+            f"market: {prediction_result.get('chosen_market')}"
+        )
 
     upsert_prediction(_get_conn(), row)
 
