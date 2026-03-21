@@ -309,17 +309,6 @@ class OddsExtractor:
         markets_found = 0
         outcomes_written = 0
 
-        # Selectors from knowledge.json
-        outcome_row_sel = _sel("market_outcome_row") or ".m-table-row.un-gap-4"
-        outcome_label_sel = (
-            _sel("market_outcome_label")
-            or "span.un-text-rem-\\[12px\\], span[class*='un-text-rem'][class*='12']"
-        )
-        outcome_odds_sel = (
-            _sel("market_outcome_odds")
-            or "span.un-text-rem-\\[14px\\].un-font-bold, span.un-font-bold[class*='un-text-rem']"
-        )
-
         # Date/time from match header
         extracted_date: Optional[str] = None
         extracted_time: Optional[str] = None
@@ -327,9 +316,8 @@ class OddsExtractor:
         try:
             await self._assert_no_login(self.page)
 
-            # ── Step 0: Extract match date + time from header ──
+            # ── Step 1: Dismiss intro dialog ──
             try:
-                # ── Step 1: Dismiss intro dialog ──
                 await _dismiss_intro_dialog(self.page)
 
                 date_sel = _sel("match_detail_date") or ".estimate-start-time .date"
@@ -340,7 +328,6 @@ class OddsExtractor:
 
                 if await date_el.count() > 0:
                     raw_date = (await date_el.inner_text()).strip()
-                    # Parse "17 Mar, Tuesday" → "2026-03-17"
                     extracted_date = _parse_fb_date(raw_date)
                     print(f"    [Odds] {fixture_id}: date from header = {raw_date} → {extracted_date}")
 
@@ -349,7 +336,6 @@ class OddsExtractor:
                     print(f"    [Odds] {fixture_id}: time from header = {extracted_time}")
             except Exception as dt_err:
                 print(f"    [Odds] {fixture_id}: date/time extraction skipped: {dt_err}")
-
 
             # ── Step 2: Recursive scroll to hydrate all market containers ──
             containers_found = await _recursive_scroll_markets(self.page)
@@ -360,99 +346,119 @@ class OddsExtractor:
             if expanded:
                 print(f"    [Odds] {fixture_id}: expanded {expanded} collapsed markets")
 
-            # ── Step 4: Extract from ranked_markets catalogue ──
+            # ── Step 4: Extract ALL outcomes via single page-level JS call ──
+            # Uses corrected selectors for current football.com DOM (2026-03):
+            #   Container : div[data-market-id]
+            #   Label     : span.un-text-encore-text-type-one-tertiary
+            #   Odds      : span.un-text-encore-brand-secondary
+            #   Row       : div.m-table-row (unchanged)
+            all_js_outcomes = await self.page.evaluate(r"""() => {
+                const results = [];
+                const containers = document.querySelectorAll('div[data-market-id]');
+
+                containers.forEach((container) => {
+                    const marketId = container.getAttribute('data-market-id');
+
+                    // Market title from header
+                    const titleEl = container.querySelector('div.m-market-title span.text');
+                    const marketName = titleEl ? titleEl.textContent.trim() : '';
+
+                    // Outcome rows
+                    const rows = container.querySelectorAll('div.m-table-row');
+
+                    rows.forEach((row) => {
+                        // Each outcome is a child div inside the row
+                        const outcomeCells = row.querySelectorAll(':scope > div');
+
+                        outcomeCells.forEach((cell, rank) => {
+                            const labelEl = cell.querySelector(
+                                'span.un-text-encore-text-type-one-tertiary'
+                            );
+                            const oddsEl = cell.querySelector(
+                                'span.un-text-encore-brand-secondary'
+                            );
+
+                            if (!labelEl || !oddsEl) return;
+
+                            const label = labelEl.textContent.trim();
+                            const oddsText = oddsEl.textContent.trim();
+                            const oddsValue = parseFloat(oddsText.replace(',', '.'));
+
+                            if (!label || isNaN(oddsValue) || oddsValue <= 1.0) return;
+
+                            results.push({
+                                market_id: marketId,
+                                base_market: marketName,
+                                name: label,
+                                odds: oddsText,
+                                odds_value: oddsValue,
+                                rank: rank
+                            });
+                        });
+                    });
+                });
+
+                return results;
+            }""")
+
+            print(f"    [Odds] {fixture_id}: JS extracted {len(all_js_outcomes)} outcomes total")
+
+            # Build a lookup from the catalogue for metadata enrichment
+            catalogue_lookup: Dict[str, Dict] = {}
+            for m in _MARKET_CATALOGUE:
+                mid = str(m.get("market_id", ""))
+                if mid and mid not in catalogue_lookup:
+                    catalogue_lookup[mid] = m
+
+            # Group extracted outcomes by market_id and save per-market
+            extracted_at = now_ng().isoformat()
             seen_market_ids: set = set()
+            market_batches: Dict[str, List[Dict]] = {}
 
-            for market in _MARKET_CATALOGUE:
-                market_id = str(market.get("market_id", ""))
-                base_market = market.get("base_market", "")
-                category = market.get("category", "")
-                likelihood = market.get("likelihood_percent", 0)
-                rank = market.get("rank", 0)
-
-                if not market_id or market_id in seen_market_ids:
+            for item in all_js_outcomes:
+                mid = str(item.get("market_id", ""))
+                if not mid:
                     continue
+                market_batches.setdefault(mid, []).append(item)
 
-                # Find the container on the page
-                container = await self.page.query_selector(
-                    f"[data-market-id='{market_id}']"
-                )
-                if not container:
-                    continue
-
-                seen_market_ids.add(market_id)
+            for mid, items in market_batches.items():
+                seen_market_ids.add(mid)
                 markets_found += 1
 
-                # Extract outcome rows
-                outcome_rows = await container.query_selector_all(
-                    outcome_row_sel.replace("\\[", "[").replace("\\]", "]")
-                    if "\\" in outcome_row_sel else outcome_row_sel
-                )
-
-                # Fallback: try broader selector if specific one got 0 rows
-                if not outcome_rows:
-                    outcome_rows = await container.query_selector_all(".m-table-row")
+                # Enrich from catalogue if available
+                cat_entry = catalogue_lookup.get(mid, {})
+                base_market = items[0].get("base_market", "") or cat_entry.get("base_market", "")
+                category = cat_entry.get("category", base_market)
+                likelihood = cat_entry.get("likelihood_percent", 0)
+                rank = cat_entry.get("rank", 0)
 
                 batch: List[Dict] = []
-                extracted_at = now_ng().isoformat()
-
-                # Use JS to extract ALL outcomes from this container at once
-                # (avoids Python↔browser round-trips and escaped-selector issues)
-                js_outcomes = await container.evaluate(r"""(el) => {
-                    const results = [];
-                    const rows = el.querySelectorAll('.m-table-row');
-                    rows.forEach(row => {
-                        const spans = row.querySelectorAll('span');
-                        if (spans.length < 2) return;
-                        // Find label (smaller font) and odds (bold) spans
-                        let label = null, odds = null;
-                        for (const sp of spans) {
-                            const cls = sp.className || '';
-                            const txt = sp.innerText.trim();
-                            if (!txt) continue;
-                            if (cls.includes('un-font-bold') && /^\d/.test(txt)) {
-                                odds = txt;
-                            } else if (!label && txt.length > 0 && !/^\d+\.\d+$/.test(txt)) {
-                                label = txt;
-                            }
-                        }
-                        // Fallback: first span = label, last span = odds
-                        if (!label && spans.length >= 2) label = spans[0].innerText.trim();
-                        if (!odds && spans.length >= 2) odds = spans[spans.length - 1].innerText.trim();
-                        if (label && odds) results.push({name: label, odds: odds});
-                    });
-                    return results;
-                }""")
-
-                for item in js_outcomes:
-                    try:
-                        name_text = item.get("name", "").strip()
-                        odds_text = item.get("odds", "").strip()
-                        if not name_text or not odds_text:
-                            continue
-
-                        try:
-                            odds_val = float(odds_text.replace(",", "."))
-                        except ValueError:
-                            continue
-                        if odds_val <= 1.0:
-                            continue
-
-                        batch.append({
-                            "fixture_id": fixture_id,
-                            "site_match_id": site_match_id,
-                            "market_id": market_id,
-                            "base_market": base_market,
-                            "category": category,
-                            "exact_outcome": name_text,
-                            "line": self._parse_line(name_text),
-                            "odds_value": odds_val,
-                            "likelihood_pct": likelihood,
-                            "rank_in_list": rank,
-                            "extracted_at": extracted_at,
-                        })
-                    except Exception:
+                for item in items:
+                    name_text = item.get("name", "").strip()
+                    odds_text = item.get("odds", "").strip()
+                    if not name_text or not odds_text:
                         continue
+
+                    try:
+                        odds_val = float(odds_text.replace(",", "."))
+                    except ValueError:
+                        continue
+                    if odds_val <= 1.0:
+                        continue
+
+                    batch.append({
+                        "fixture_id": fixture_id,
+                        "site_match_id": site_match_id,
+                        "market_id": mid,
+                        "base_market": base_market,
+                        "category": category,
+                        "exact_outcome": name_text,
+                        "line": self._parse_line(name_text),
+                        "odds_value": odds_val,
+                        "likelihood_pct": likelihood,
+                        "rank_in_list": rank,
+                        "extracted_at": extracted_at,
+                    })
 
                 # IMMEDIATE save after each market
                 if batch:
