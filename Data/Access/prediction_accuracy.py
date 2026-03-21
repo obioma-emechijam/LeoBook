@@ -128,7 +128,7 @@ def calculate_accuracy_by_date(predictions: List[Dict]) -> Dict[str, Dict]:
 
     for pred in predictions:
         outcome = pred.get('outcome_correct')
-        if outcome in ['True', 'False']:
+        if outcome in ['1', '0']:
             date = pred.get('date', 'Unknown')
             confidence = pred.get('confidence', 'Low').strip() # Default to Low if missing
             
@@ -162,12 +162,12 @@ def calculate_accuracy_by_date(predictions: List[Dict]) -> Dict[str, Dict]:
 
             # Update Daily Totals
             accuracy_by_date[date]['total_predictions'] += 1
-            if outcome == 'True':
+            if outcome == '1':
                 accuracy_by_date[date]['correct_predictions'] += 1
 
             # Update Confidence Stats
             accuracy_by_date[date]['confidence_stats'][confidence]['total'] += 1
-            if outcome == 'True':
+            if outcome == '1':
                 accuracy_by_date[date]['confidence_stats'][confidence]['correct'] += 1
             
             # Update Market Stats
@@ -175,7 +175,7 @@ def calculate_accuracy_by_date(predictions: List[Dict]) -> Dict[str, Dict]:
                 accuracy_by_date[date]['market_stats'][market_option] = {'total': 0, 'correct': 0, 'acc': 0.0}
             
             accuracy_by_date[date]['market_stats'][market_option]['total'] += 1
-            if outcome == 'True':
+            if outcome == '1':
                 accuracy_by_date[date]['market_stats'][market_option]['correct'] += 1
 
     # Calculate percentages
@@ -214,9 +214,9 @@ def calculate_overall_accuracy(predictions: List[Dict]) -> Dict:
 
     for pred in predictions:
         outcome = pred.get('outcome_correct')
-        if outcome in ['True', 'False']:
+        if outcome in ['1', '0']:
             total_reviewed += 1
-            if outcome == 'True':
+            if outcome == '1':
                 total_correct += 1
 
             date_str = pred.get('date')
@@ -279,7 +279,7 @@ def calculate_accuracy_by_confidence(predictions: List[Dict]) -> Dict[str, Dict]
         outcome = pred.get('outcome_correct')
         confidence = pred.get('confidence', '').strip()
 
-        if outcome in ['True', 'False']:
+        if outcome in ['1', '0']:
             # Determine confidence level
             conf_level = 'Low'  # Default to Low
             for level, aliases in confidence_mapping.items():
@@ -288,7 +288,7 @@ def calculate_accuracy_by_confidence(predictions: List[Dict]) -> Dict[str, Dict]
                     break
 
             accuracy_by_confidence[conf_level]['total_predictions'] += 1
-            if outcome == 'True':
+            if outcome == '1':
                 accuracy_by_confidence[conf_level]['correct_predictions'] += 1
 
     # Calculate percentages for each confidence level
@@ -360,7 +360,7 @@ def print_accuracy_report():
     # Filter for reviewed predictions only (must have actual resolved outcomes)
     reviewed_predictions = [
         pred for pred in predictions
-        if pred.get('outcome_correct') in ['True', 'False']
+        if pred.get('outcome_correct') in ['1', '0']
     ]
 
     total_pending = sum(1 for p in predictions if p.get('status') == 'pending')

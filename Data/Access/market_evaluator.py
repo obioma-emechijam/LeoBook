@@ -61,7 +61,7 @@ def evaluate_market_outcome(prediction: str, home_score: str, away_score: str,
     def _is_away(team_str: str) -> bool:
         return _team_matches(team_str, a_lower)
 
-    # 0. Winner & BTTS
+    # 0. Winner & BTTS (team to win & btts yes)
     btts_win_match = re.match(r'^(.+?)\s+to\s+win\s*&\s*btts\s+yes$', p)
     if btts_win_match:
         team = btts_win_match.group(1).strip()
@@ -69,13 +69,49 @@ def evaluate_market_outcome(prediction: str, home_score: str, away_score: str,
         if _is_home(team): return '1' if h > a and btts else '0'
         if _is_away(team): return '1' if a > h and btts else '0'
 
+    # 0a. 1X2 & BTTS combos (e.g. "1 & gg", "2 & btts yes", "x & gg")
+    ixb = re.match(r'^(1|2|x|home win|away win|draw)\s*&\s*(gg|btts\s*yes|both teams to score)$', p)
+    if ixb:
+        result_part = ixb.group(1).strip()
+        btts = h > 0 and a > 0
+        if result_part in ('1', 'home win'): return '1' if h > a and btts else '0'
+        if result_part in ('2', 'away win'): return '1' if a > h and btts else '0'
+        if result_part in ('x', 'draw'): return '1' if h == a and btts else '0'
+
+    # 0b. 1X2 & Over/Under combos (e.g. "1 & over 2.5", "home & over 2.5")
+    ixo = re.match(r'^(1|2|x|home win|away win|draw|home|away)\s*&\s*(over|under)\s+([\d.]+)$', p)
+    if ixo:
+        result_part = ixo.group(1).strip()
+        direction = ixo.group(2)
+        threshold = float(ixo.group(3))
+        if direction == 'over':
+            goals_ok = total > threshold
+        else:
+            goals_ok = total < threshold
+        if result_part in ('1', 'home win', 'home'): return '1' if h > a and goals_ok else '0'
+        if result_part in ('2', 'away win', 'away'): return '1' if a > h and goals_ok else '0'
+        if result_part in ('x', 'draw'): return '1' if h == a and goals_ok else '0'
+
+    # 0c. Double Chance & BTTS combos (e.g. "1x & gg", "x2 & btts yes", "12 & gg")
+    dcb = re.match(r'^(1x|x2|12|home or draw|away or draw|home or away)\s*&\s*(gg|btts\s*yes|both teams to score|ng|btts\s*no)$', p)
+    if dcb:
+        dc_part = dcb.group(1).strip()
+        btts_part = dcb.group(2).strip()
+        if btts_part in ('gg', 'btts yes', 'both teams to score'):
+            btts = h > 0 and a > 0
+        else:
+            btts = h == 0 or a == 0
+        if dc_part in ('1x', 'home or draw'): return '1' if h >= a and btts else '0'
+        if dc_part in ('x2', 'away or draw'): return '1' if a >= h and btts else '0'
+        if dc_part in ('12', 'home or away'): return '1' if h != a and btts else '0'
+
     # 1. Standard Markets
     if p in ("over 2.5", "over 2_5", "over_2.5", "over_2_5"): return '1' if total > 2.5 else '0'
     if p in ("under 2.5", "under 2_5", "under_2.5", "under_2_5"): return '1' if total < 2.5 else '0'
     if p in ("over 1.5", "over 1_5", "over_1.5", "over_1_5"): return '1' if total > 1.5 else '0'
     if p in ("under 1.5", "under 1_5", "under_1.5", "under_1_5"): return '1' if total < 1.5 else '0'
-    if p in ("btts yes", "btts_yes", "both teams to score yes", "both teams to score"): return '1' if h > 0 and a > 0 else '0'
-    if p in ("btts no", "btts_no", "both teams to score no"): return '1' if h == 0 or a == 0 else '0'
+    if p in ("btts yes", "btts_yes", "both teams to score yes", "both teams to score", "gg"): return '1' if h > 0 and a > 0 else '0'
+    if p in ("btts no", "btts_no", "both teams to score no", "ng"): return '1' if h == 0 or a == 0 else '0'
     if p in ("home win", "home_win", "1"): return '1' if h > a else '0'
     if p in ("away win", "away_win", "2"): return '1' if a > h else '0'
     if p in ("draw", "x"): return '1' if h == a else '0'
@@ -138,13 +174,35 @@ def evaluate_market_outcome(prediction: str, home_score: str, away_score: str,
         if "home" in p: return '1' if h < threshold else '0'
         return '1' if total < threshold else '0'
 
-    # 6. Clean Sheet
+    # 6. Clean Sheet (team-name based + keyword fallback)
     if "clean sheet" in p:
-        team = p.replace(" clean sheet", "").strip()
-        if _is_home(team): return '1' if a == 0 else '0'
-        if _is_away(team): return '1' if h == 0 else '0'
+        team = p.replace(" clean sheet", "").replace("clean sheet ", "").strip()
+        if team in ("home", "") or _is_home(team): return '1' if a == 0 else '0'
+        if team == "away" or _is_away(team): return '1' if h == 0 else '0'
+        # Keyword fallback: "clean sheet - home - yes", "clean sheet - away - yes"
+        if "home" in p: return '1' if a == 0 else '0'
+        if "away" in p: return '1' if h == 0 else '0'
+
+    # 7. Win to Nil
+    if "win to nil" in p:
+        if "home" in p or _is_home(p.replace("win to nil", "").replace("to win to nil", "").strip()):
+            return '1' if h > 0 and a == 0 else '0'
+        if "away" in p or _is_away(p.replace("win to nil", "").replace("to win to nil", "").strip()):
+            return '1' if a > 0 and h == 0 else '0'
+        # Team-name based: "Arsenal win to nil"
+        team = p.replace(" win to nil", "").strip()
+        if _is_home(team): return '1' if h > 0 and a == 0 else '0'
+        if _is_away(team): return '1' if a > 0 and h == 0 else '0'
+
+    # 8. Correct Score (e.g. "correct score 2-1", "2-1", "correct score - 2:1")
+    cs_match = re.search(r'(\d+)\s*[-:]\s*(\d+)', p)
+    if cs_match and ('correct score' in p or re.fullmatch(r'\d+\s*-\s*\d+', p)):
+        exp_h = int(cs_match.group(1))
+        exp_a = int(cs_match.group(2))
+        return '1' if h == exp_h and a == exp_a else '0'
 
     return ''
 
 
 __all__ = ["evaluate_market_outcome"]
+

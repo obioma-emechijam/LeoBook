@@ -155,9 +155,10 @@ async def run_utility(args):
     elif args.review:
         print("\n  --- LEO: Outcome Review ---")
         async with async_playwright() as p:
-            from Data.Access.outcome_reviewer import run_review_process
+            from Data.Access.outcome_reviewer import run_review_process, run_accuracy_generation
             await run_review_process(p)
             print_accuracy_report()
+            await run_accuracy_generation()
 
     elif args.streamer:
         import subprocess

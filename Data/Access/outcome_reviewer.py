@@ -231,7 +231,11 @@ def _sync_outcome_to_site_registry(fixture_id: str, match_data: Dict):
         home_team = match_data.get('home_team', '')
         away_team = match_data.get('away_team', '')
 
-        res = evaluate_market_outcome(prediction, actual_score, "", home_team, away_team)
+        score_match = re.match(r'(\d+)\s*-\s*(\d+)', actual_score or '')
+        if not score_match:
+            return
+
+        res = evaluate_market_outcome(prediction, score_match.group(1), score_match.group(2), home_team, away_team)
         if not res:
             return
 
@@ -560,6 +564,3 @@ async def run_accuracy_generation():
         print(f"   [ACCURACY ERROR] {e}")
 
 
-async def start_review():
-    """Legacy entry point."""
-    await run_review_process()
