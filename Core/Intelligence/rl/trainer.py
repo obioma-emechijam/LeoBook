@@ -75,6 +75,7 @@ from .market_space import (
     PHASE2_MIN_ODDS_ROWS, PHASE2_MIN_DAYS_LIVE,
     PHASE3_MIN_ODDS_ROWS, PHASE3_MIN_DAYS_LIVE,
 )
+from Data.Access.market_evaluator import evaluate_market_outcome
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 MODELS_DIR = PROJECT_ROOT / "Data" / "Store" / "models"
@@ -652,6 +653,16 @@ class RLTrainer(TrainerPhasesMixin, TrainerIOMixin):
             print(f"  [TRAIN] Phase 1 LR reduced 10x for stable imitation "
                   f"(base → {self.optimizer.param_groups[0]['lr']:.2e})")
 
+        # ── Walk-forward Recommender ─────────────────────────────────
+        import sys as _sys
+        _sys.path.insert(0, str(PROJECT_ROOT))
+        from Scripts.recommend_bets import AdaptiveRecommender
+        rec_training_path = str(MODELS_DIR / "recommender_weights_training.json")
+        recommender = AdaptiveRecommender(weights_path=rec_training_path)
+        rec_total_picks = 0
+        rec_total_correct = 0
+        print(f"  [TRAIN] Walk-forward recommender initialized (training weights).")
+
         for day_offset, match_date in enumerate(all_dates):
             day_idx = start_day_idx + day_offset
             day_matches = 0
@@ -662,6 +673,7 @@ class RLTrainer(TrainerPhasesMixin, TrainerIOMixin):
             day_rule_acc = 0.0
             day_grad_norm = 0.0
             day_max_prob = 0.0
+            day_rec_candidates = []  # Walk-forward recommendation candidates
 
             cursor = conn.execute("""
                 SELECT 
@@ -795,24 +807,64 @@ class RLTrainer(TrainerPhasesMixin, TrainerIOMixin):
 
                 self.registry.record_match(league_id, home_tid, away_tid)
 
+                # ── Walk-forward: collect candidate for recommendation ──
+                action_meta = ACTIONS[action_idx]
+                pred_str = action_meta["key"]
+                outcome_result = evaluate_market_outcome(
+                    pred_str, str(h_score), str(a_score), h_name, a_name
+                )
+                is_pred_correct = (outcome_result == '1')
+
+                league_row = conn.execute(
+                    "SELECT name, region FROM leagues WHERE league_id = ?",
+                    (league_id,)
+                ).fetchone()
+                region_league = f"{league_row['region']} - {league_row['name']}" if league_row else 'Unknown'
+
+                day_rec_candidates.append({
+                    'fixture_id': fixture_id,
+                    'home_team': h_name,
+                    'away_team': a_name,
+                    'market': pred_str,
+                    'prediction': pred_str,
+                    'region_league': region_league,
+                    'confidence': 'High' if metrics.get('max_prob', 0) > 0.6 else 'Medium' if metrics.get('max_prob', 0) > 0.3 else 'Low',
+                    'is_correct': is_pred_correct,
+                })
+
+            # ── Walk-forward Recommendation: select, evaluate, learn ──
+            rec_day_acc = 0.0
+            rec_day_total = 0
+            if day_matches > 0 and day_rec_candidates:
+                top_picks = recommender.select_top_picks(
+                    day_rec_candidates, min_picks=2, max_picks=8
+                )
+                rec_day_correct = sum(1 for p in top_picks if p['is_correct'])
+                rec_day_total = len(top_picks)
+                rec_day_acc = (rec_day_correct / rec_day_total * 100) if rec_day_total > 0 else 0
+                rec_total_picks += rec_day_total
+                rec_total_correct += rec_day_correct
+                recommender.learn_from_day(day_rec_candidates)
+
             if day_matches > 0:
                 rl_acc = (day_rl_acc / day_matches) * 100
                 rule_acc = (day_rule_acc / day_matches) * 100
                 kl = day_kl / day_matches
                 gn = day_grad_norm / day_matches
                 max_prob_pct = (day_max_prob / day_matches) * 100
+                rec_str = f" | Rec: {rec_day_acc:4.1f}%({rec_day_total}pk)" if rec_day_total > 0 else ""
                 if active_phase == 1:
                     il = day_imit_loss / day_matches
                     print(f"  [Day {day_idx+1:3d}/{start_day_idx + len(all_dates)}] "
-                          f"Rule Acc: {rule_acc:4.1f}% | RL Acc: {rl_acc:4.1f}% | "
-                          f"KL: {kl:5.3f} | ImitLoss: {il:6.4f} | MaxProb: {max_prob_pct:4.1f}% | "
-                          f"GradNorm: {gn:.4f} | Matches: {day_matches}")
+                          f"Rule: {rule_acc:4.1f}% | RL: {rl_acc:4.1f}%{rec_str} | "
+                          f"KL: {kl:5.3f} | IL: {il:6.4f} | MP: {max_prob_pct:4.1f}% | "
+                          f"GN: {gn:.4f} | M: {day_matches}")
                 else:
                     rw = day_reward / day_matches
                     print(f"  [Day {day_idx+1:3d}/{start_day_idx + len(all_dates)}] "
-                          f"Rule Acc: {rule_acc:4.1f}% | RL Acc: {rl_acc:4.1f}% | "
-                          f"KL: {kl:5.3f} | Reward: {rw:6.3f} | MaxProb: {max_prob_pct:4.1f}% | "
-                          f"GradNorm: {gn:.4f} | Matches: {day_matches}")
+                          f"Rule: {rule_acc:4.1f}% | RL: {rl_acc:4.1f}%{rec_str} | "
+                          f"KL: {kl:5.3f} | Rw: {rw:6.3f} | MP: {max_prob_pct:4.1f}% | "
+                          f"GN: {gn:.4f} | M: {day_matches}")
 
                 # --- KL annealing for true outperformance (Phase 2+) ---
                 if active_phase >= 2:
@@ -855,4 +907,21 @@ class RLTrainer(TrainerPhasesMixin, TrainerIOMixin):
                 pg['lr'] = lr
 
         self.save()
+
+        # ── Walk-forward Recommender Summary ────────────────────────
+        if rec_total_picks > 0:
+            overall_rec_acc = (rec_total_correct / rec_total_picks) * 100
+            print(f"\n  ============================================================")
+            print(f"  RECOMMENDATION TRAINING SUMMARY")
+            print(f"  ============================================================")
+            print(f"  Total picks:     {rec_total_picks}")
+            print(f"  Correct picks:   {rec_total_correct}")
+            print(f"  Overall Rec Acc: {overall_rec_acc:.1f}%")
+            print(f"  Target:          70.0% (Stairway survival floor)")
+            print(f"  Status:          {'✓ ABOVE TARGET' if overall_rec_acc >= 70 else '✗ BELOW TARGET'}")
+            print(f"  ============================================================")
+            recommender.copy_to_production()
+        else:
+            print(f"\n  [Recommender] No recommendation picks made during training.")
+
         print(f"\n  [TRAIN] Phase {phase} complete. Model saved.")

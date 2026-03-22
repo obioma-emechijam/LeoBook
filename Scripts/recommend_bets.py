@@ -68,14 +68,15 @@ class AdaptiveRecommender:
 
     EMA_ALPHA = 0.15  # Smoothing factor — higher = more recent-weighting
 
-    def __init__(self):
+    def __init__(self, weights_path: str = None):
+        self._weights_path = Path(weights_path) if weights_path else RECOMMENDER_DB
         self.weights = self._load()
 
     def _load(self) -> dict:
         """Load weights from disk, or create defaults."""
-        if RECOMMENDER_DB.exists():
+        if self._weights_path.exists():
             try:
-                with open(RECOMMENDER_DB, 'r', encoding='utf-8') as f:
+                with open(self._weights_path, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except Exception:
                 pass
@@ -88,8 +89,8 @@ class AdaptiveRecommender:
 
     def _save(self):
         """Persist weights to disk."""
-        os.makedirs(RECOMMENDER_DB.parent, exist_ok=True)
-        with open(RECOMMENDER_DB, 'w', encoding='utf-8') as f:
+        os.makedirs(self._weights_path.parent, exist_ok=True)
+        with open(self._weights_path, 'w', encoding='utf-8') as f:
             json.dump(self.weights, f, indent=2, ensure_ascii=False)
 
     def learn(self, all_predictions: list):
@@ -130,6 +131,60 @@ class AdaptiveRecommender:
         self.weights["meta"]["total_learned"] = learned
         self._save()
         return learned
+
+    def learn_from_day(self, day_predictions: list):
+        """
+        Walk-forward single-day EMA update.
+        Called by trainer.py for each historical date during --train-rl.
+
+        Each item in day_predictions must have:
+            - 'market': str (e.g. 'Over/Under - Over 2.5')
+            - 'region_league': str
+            - 'confidence': str
+            - 'is_correct': bool
+        """
+        mw = self.weights["market_weights"]
+        lw = self.weights["league_weights"]
+        cw = self.weights["confidence_weights"]
+
+        for p in day_predictions:
+            is_correct = 1.0 if p.get('is_correct') else 0.0
+            market = p.get('market', 'Unknown')
+            league = p.get('region_league', 'Unknown')
+            conf = p.get('confidence', 'Medium')
+
+            for bucket, key in [(mw, market), (lw, league), (cw, conf)]:
+                if key not in bucket:
+                    bucket[key] = {"ema_acc": 0.50, "n": 0}
+                entry = bucket[key]
+                entry["ema_acc"] = (
+                    self.EMA_ALPHA * is_correct + (1 - self.EMA_ALPHA) * entry["ema_acc"]
+                )
+                entry["n"] += 1
+
+        self.weights["meta"]["total_learned"] = (
+            self.weights["meta"].get("total_learned", 0) + len(day_predictions)
+        )
+        self._save()
+
+    def select_top_picks(self, candidates: list, min_picks: int = 2, max_picks: int = 8) -> list:
+        """
+        Score and select top 20% of candidates, bounded by [min_picks, max_picks].
+        Returns the selected candidates sorted by score descending.
+        """
+        for c in candidates:
+            c['rec_score'] = self.score(c, c.get('market', 'Unknown'))
+        candidates.sort(key=lambda x: x['rec_score'], reverse=True)
+        n = max(min_picks, int(len(candidates) * 0.20))
+        n = min(n, max_picks, len(candidates))
+        return candidates[:n]
+
+    def copy_to_production(self):
+        """Copy training weights to production path."""
+        import shutil
+        if self._weights_path != RECOMMENDER_DB and self._weights_path.exists():
+            shutil.copy2(self._weights_path, RECOMMENDER_DB)
+            print(f"  [Recommender] Training weights copied to production: {RECOMMENDER_DB}")
 
     def score(self, prediction: dict, market: str) -> float:
         """
