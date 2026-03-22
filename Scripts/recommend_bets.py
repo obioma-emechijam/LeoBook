@@ -68,6 +68,12 @@ class AdaptiveRecommender:
 
     EMA_ALPHA = 0.15  # Smoothing factor — higher = more recent-weighting
 
+    # ── Specialization Thresholds ──
+    # If a league/market has EMA accuracy BELOW this floor after MIN_SAMPLES,
+    # it is gated out entirely — the system stops recommending from it.
+    SPEC_MIN_EMA = 0.40      # 40% — worse than a coin flip on binary markets
+    SPEC_MIN_SAMPLES = 20    # Need at least 20 observations before gating
+
     def __init__(self, weights_path: str = None):
         self._weights_path = Path(weights_path) if weights_path else RECOMMENDER_DB
         self.weights = self._load()
@@ -188,39 +194,74 @@ class AdaptiveRecommender:
 
     def score(self, prediction: dict, market: str) -> float:
         """
-        Compute adaptive recommendation score for a single prediction.
+        Compute adaptive recommendation score with calibration + specialization.
 
-        Score components:
-            40%  Market EMA accuracy (learned)
-            25%  League EMA accuracy (learned)
-            20%  Confidence label EMA accuracy (learned)
-            15%  Recency bonus (predictions with recent positive momentum)
+        Calibration:
+            Instead of using discrete confidence labels (Low/Med/High/Very High),
+            the score is based on the ACTUAL observed win rates from EMA data.
+            Market EMA of 0.65 means "this market type wins 65% of the time" —
+            that IS the calibrated probability.
 
-        Returns float in [0, 1].
+        Specialization:
+            If a league or market has EMA < SPEC_MIN_EMA after SPEC_MIN_SAMPLES
+            observations, score returns 0.0 — the prediction is excluded.
+
+        Score = 45% market_EMA + 35% league_EMA + 20% sample_reliability
+
+        Returns float in [0, 1]. Returns 0.0 for gated-out predictions.
         """
         mw = self.weights.get("market_weights", {})
         lw = self.weights.get("league_weights", {})
-        cw = self.weights.get("confidence_weights", {})
 
         league = prediction.get('region_league', 'Unknown')
-        conf = prediction.get('confidence', 'Medium')
 
-        # Get learned accuracies (default 0.50 for unknown entities)
-        market_acc = mw.get(market, {}).get("ema_acc", 0.50)
-        league_acc = lw.get(league, {}).get("ema_acc", 0.50)
-        conf_acc = cw.get(conf, {}).get("ema_acc", 0.50)
+        market_entry = mw.get(market, {})
+        league_entry = lw.get(league, {})
 
-        # Recency bonus: boost if learned sample size is large (stable signal)
-        market_n = mw.get(market, {}).get("n", 0)
-        recency_bonus = min(market_n / 100.0, 1.0)  # caps at n=100
+        market_acc = market_entry.get("ema_acc", 0.50)
+        market_n = market_entry.get("n", 0)
+        league_acc = league_entry.get("ema_acc", 0.50)
+        league_n = league_entry.get("n", 0)
+
+        # ── Specialization Gate ──
+        # If we have enough data and the entity is underperforming, exclude it
+        if market_n >= self.SPEC_MIN_SAMPLES and market_acc < self.SPEC_MIN_EMA:
+            return 0.0  # This market type is not profitable — skip
+        if league_n >= self.SPEC_MIN_SAMPLES and league_acc < self.SPEC_MIN_EMA:
+            return 0.0  # This league is not predictable — skip
+
+        # ── Calibrated Score ──
+        # market_acc and league_acc ARE the calibrated probabilities.
+        # No discrete confidence tiers — the EMA IS the calibration curve.
+        # Sample reliability: trust estimates with more data points
+        reliability = min((market_n + league_n) / 200.0, 1.0)
 
         total = (
-            market_acc * 0.40 +
-            league_acc * 0.25 +
-            conf_acc * 0.20 +
-            recency_bonus * 0.15
+            market_acc * 0.45 +
+            league_acc * 0.35 +
+            reliability * 0.20
         )
         return round(total, 4)
+
+    def calibrated_prob(self, market: str, league: str) -> float:
+        """
+        Return the calibrated win probability for a market+league combination.
+        This is the actual expected accuracy based on learned EMA data.
+
+        Usage: instead of "High confidence", you get "0.68 probability".
+        """
+        mw = self.weights.get("market_weights", {})
+        lw = self.weights.get("league_weights", {})
+
+        m_acc = mw.get(market, {}).get("ema_acc", 0.50)
+        l_acc = lw.get(league, {}).get("ema_acc", 0.50)
+        m_n = mw.get(market, {}).get("n", 0)
+        l_n = lw.get(league, {}).get("n", 0)
+
+        # Weighted average by sample size (more data = more weight)
+        if m_n + l_n == 0:
+            return 0.50
+        return (m_acc * m_n + l_acc * l_n) / (m_n + l_n)
 
 
 # ═══════════════════════════════════════════════════════════════
