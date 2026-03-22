@@ -226,7 +226,16 @@ class HomeCubit extends Cubit<HomeState> {
     try {
       final currentState = state as HomeLoaded;
       final freshMatches = await _dataRepository.fetchMatches(date: currentState.selectedDate);
+
+      // Guard: if we have good data and fresh fetch is suspiciously small,
+      // it's likely a transient Supabase timeout — skip this refresh cycle.
       if (freshMatches.isEmpty || isClosed) return;
+      if (currentState.allMatches.length > 10 &&
+          freshMatches.length < currentState.allMatches.length * 0.3) {
+        debugPrint('Periodic refresh: skipping suspicious result '
+            '(${freshMatches.length} vs ${currentState.allMatches.length})');
+        return;
+      }
 
       // Upsert: only merge if data actually changed
       final Map<String, MatchModel> matchMap = {

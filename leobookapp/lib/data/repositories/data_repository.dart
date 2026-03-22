@@ -21,7 +21,9 @@ class DataRepository {
 
   Future<List<MatchModel>> fetchMatches({DateTime? date}) async {
     try {
-      var query = _supabase.from('predictions').select();
+      // Primary source: schedules (always populated).
+      // Predictions table may be empty — treat as optional enrichment.
+      var query = _supabase.from('schedules').select();
 
       if (date != null) {
         final dateStr =
@@ -29,27 +31,51 @@ class DataRepository {
         query = query.eq('date', dateStr);
       }
 
-      // When date-filtered, the result set is bounded (typically 500-1200 rows per day).
-      // No need for .limit() which causes statement timeouts on large tables.
-      // Only apply limit for unfiltered queries (fallback for latest matches).
       final ordered = query.order('date', ascending: false);
       final response = date != null
           ? await ordered
           : await ordered.limit(300);
 
-      // Cache a small subset locally (localStorage has ~5MB limit on Web)
+      final scheduleRows = response as List;
+
+      // Try to enrich with predictions (fire-and-forget; don't block if empty)
+      Map<String, Map<String, dynamic>> predMap = {};
       try {
-        final prefs = await SharedPreferences.getInstance();
-        final listToCache = (response as List).take(50).toList();
-        await prefs.setString(_keyPredictions, jsonEncode(listToCache));
-      } catch (e) {
-        debugPrint('Warning: Could not cache predictions (quota exceeded): $e');
+        if (date != null) {
+          final dateStr =
+              "${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
+          final predRes = await _supabase
+              .from('predictions')
+              .select()
+              .eq('date', dateStr);
+          for (var p in (predRes as List)) {
+            final fid = p['fixture_id']?.toString();
+            if (fid != null) predMap[fid] = p;
+          }
+        }
+      } catch (_) {
+        // predictions table empty or failed — proceed with schedules only
       }
 
-      return (response as List)
-          .map((row) => MatchModel.fromCsv(row, row))
-          .where((m) => m.prediction != null && m.prediction!.isNotEmpty)
-          .toList();
+      // Merge: schedule row + prediction overlay
+      final matches = scheduleRows.map((row) {
+        final fid = row['fixture_id']?.toString() ?? '';
+        final pred = predMap[fid];
+        // Overlay prediction fields onto schedule row
+        final merged = pred != null ? {...row, ...pred} : row;
+        return MatchModel.fromCsv(merged, merged);
+      }).toList();
+
+      // Cache a small subset locally
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final listToCache = scheduleRows.take(50).toList();
+        await prefs.setString(_keyPredictions, jsonEncode(listToCache));
+      } catch (e) {
+        debugPrint('Warning: Could not cache matches (quota exceeded): $e');
+      }
+
+      return matches;
     } catch (e) {
       debugPrint("DataRepository Error (Supabase): $e");
 
@@ -62,7 +88,6 @@ class DataRepository {
           final List<dynamic> cachedData = jsonDecode(cachedString);
           return cachedData
               .map((row) => MatchModel.fromCsv(row, row))
-              .where((m) => m.prediction != null && m.prediction!.isNotEmpty)
               .toList();
         } catch (cacheError) {
           debugPrint("Failed to load from cache: $cacheError");
