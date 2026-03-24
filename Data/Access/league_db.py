@@ -5,14 +5,13 @@
 # CSV files are auto-imported on first init_db() call, then renamed to .csv.bak.
 
 import sqlite3
-import csv
 import json
 import os
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Union
 from Core.Utils.constants import now_ng
 from Data.Access.league_db_schema import (
-    _SCHEMA_SQL, _ALTER_MIGRATIONS, _CSV_TABLE_MAP, _COMPUTED_STANDINGS_SQL,
+    _SCHEMA_SQL, _ALTER_MIGRATIONS, _COMPUTED_STANDINGS_SQL,
 )
 
 DB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "Store")
@@ -81,15 +80,8 @@ def get_connection() -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------
-# Schema (DDL, migrations, and CSV map are in league_db_schema.py)
-# ---------------------------------------------------------------------------
-
-# All DDL strings, ALTER migrations and CSV import map are in league_db_schema.py.
-# Imported at top of file: _SCHEMA_SQL, _ALTER_MIGRATIONS, _CSV_TABLE_MAP,
-# _COMPUTED_STANDINGS_SQL
-
-
-
+# All DDL strings and ALTER migrations are in league_db_schema.py.
+# Imported at top of file: _SCHEMA_SQL, _ALTER_MIGRATIONS, _COMPUTED_STANDINGS_SQL
 
 
 
@@ -162,54 +154,6 @@ def _get_table_columns(conn: sqlite3.Connection, table: str) -> List[str]:
     return [r[1] for r in rows]
 
 
-def _auto_import_csvs(conn: sqlite3.Connection):
-    """One-time import: read each CSV, INSERT OR IGNORE into SQLite, rename CSV to .bak."""
-    for csv_name, (table, pk, rename_map) in _CSV_TABLE_MAP.items():
-        csv_path = os.path.join(DB_DIR, csv_name)
-        bak_path = csv_path + ".bak"
-
-        if not os.path.exists(csv_path) or os.path.exists(bak_path):
-            continue
-
-        table_cols = _get_table_columns(conn, table)
-
-        with open(csv_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-
-        if not rows:
-            os.rename(csv_path, bak_path)
-            continue
-
-        imported = 0
-        for row in rows:
-            # Apply column renames
-            for old_name, new_name in rename_map.items():
-                if old_name in row:
-                    row[new_name] = row.pop(old_name)
-
-            # Filter to only columns that exist in the table
-            filtered = {k: v for k, v in row.items() if k in table_cols}
-            if not filtered:
-                continue
-
-            cols = list(filtered.keys())
-            placeholders = ", ".join(["?"] * len(cols))
-            col_str = ", ".join(cols)
-            vals = [filtered[c] for c in cols]
-
-            try:
-                conn.execute(
-                    f"INSERT OR IGNORE INTO {table} ({col_str}) VALUES ({placeholders})",
-                    vals,
-                )
-                imported += 1
-            except sqlite3.Error:
-                pass  # Skip bad rows
-
-        conn.commit()
-        os.rename(csv_path, bak_path)
-        print(f"  [migrate] {csv_name}: {imported}/{len(rows)} rows -> {table}")
 
 
 def _create_post_alter_indexes(conn: sqlite3.Connection):
@@ -321,7 +265,7 @@ def _migrate_match_odds_if_needed(conn: sqlite3.Connection):
 
 
 def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
-    """Create all tables, run migrations, auto-import CSVs. Returns the connection."""
+    """Create all tables, run migrations. Returns the connection."""
     if conn is None:
         conn = get_connection()
 
@@ -334,7 +278,6 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
     _create_post_alter_indexes(conn)
     _reconstruct_teams_table_if_legacy_unique_exists(conn)
     _initialize_countries(conn)
-    _auto_import_csvs(conn)
 
     return conn
 
@@ -977,44 +920,37 @@ def upsert_live_score(conn: sqlite3.Connection, data: Dict[str, Any]):
 # ---------------------------------------------------------------------------
 
 def upsert_fb_match(conn: sqlite3.Connection, data: Dict[str, Any]):
-    """Insert or update an fb_matches entry."""
+    """Insert or update an fb_matches entry.
+
+    Writes only the columns present in both the local SQLite schema AND the
+    Supabase v5.0 schema. Columns removed from Supabase (odds, booking_status,
+    booking_details, booking_code, booking_url, last_extracted, league, status)
+    are intentionally excluded to keep sync_schema.py from pushing dead writes.
+    The SQLite table still has those columns for local diagnostics; they are
+    simply not populated by this function.
+    """
     now = now_ng().isoformat()
     conn.execute(
         """INSERT INTO fb_matches (site_match_id, date, time, home_team, away_team,
-               league, url, last_extracted, fixture_id, matched, odds,
-               booking_status, booking_details, booking_code, booking_url,
-               status, last_updated)
+               url, last_updated, fixture_id, matched)
            VALUES (:site_match_id, :date, :time, :home_team, :away_team,
-               :league, :url, :last_extracted, :fixture_id, :matched, :odds,
-               :booking_status, :booking_details, :booking_code, :booking_url,
-               :status, :last_updated)
+               :url, :last_updated, :fixture_id, :matched)
            ON CONFLICT(site_match_id) DO UPDATE SET
                date           = COALESCE(excluded.date, fb_matches.date),
                fixture_id     = COALESCE(excluded.fixture_id, fb_matches.fixture_id),
                matched        = COALESCE(excluded.matched, fb_matches.matched),
-               odds           = COALESCE(excluded.odds, fb_matches.odds),
-               booking_status = COALESCE(excluded.booking_status, fb_matches.booking_status),
-               status         = COALESCE(excluded.status, fb_matches.status),
                last_updated   = excluded.last_updated
         """,
         {
             "site_match_id": data["site_match_id"],
             "date": data.get("date"),
-            "time": data.get("time"),
+            "time": data.get("time", data.get("match_time")),
             "home_team": data.get("home_team"),
             "away_team": data.get("away_team"),
-            "league": data.get("league"),
             "url": data.get("url"),
-            "last_extracted": data.get("last_extracted"),
+            "last_updated": now,
             "fixture_id": data.get("fixture_id"),
             "matched": data.get("matched"),
-            "odds": data.get("odds"),
-            "booking_status": data.get("booking_status"),
-            "booking_details": data.get("booking_details"),
-            "booking_code": data.get("booking_code"),
-            "booking_url": data.get("booking_url"),
-            "status": data.get("status"),
-            "last_updated": now,
         },
     )
     conn.commit()

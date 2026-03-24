@@ -45,22 +45,20 @@ def log_state(chapter=None, action=None, next_step=None, why=None, expect=None):
     print(f"   [STATE] {state['current_chapter']} | Done: {state['last_action']} | Next: {state['next_expected']} | Why: {state['why_this_step']}")
 
 def log_audit_state(chapter: str, action: str, details: str = ""):
-    """Central state logger — prints to console and appends to audit_log.csv"""
+    """Central state logger — prints to console and writes to audit_log table (SQLite)."""
     timestamp = dt.now().strftime("%Y-%m-%d %H:%M:%S")
     message = f"[{timestamp}] [STATE] {chapter} | Action: {action} | {details}"
     print(message)
-    
-    from Data.Access.db_helpers import append_to_csv
-    append_to_csv("audit_log.csv", {
-        "id": str(uuid.uuid4()),
-        "timestamp": timestamp,
-        "event_type": "STATE",
-        "description": f"{chapter} - {action} - {details}",
-        "balance_before": "",
-        "balance_after": "",
-        "stake": "",
-        "status": "INFO"
-    })
+
+    try:
+        from Data.Access.db_helpers import log_audit_event
+        log_audit_event(
+            event_type="STATE",
+            description=f"{chapter} - {action} - {details}",
+            status="INFO"
+        )
+    except Exception:
+        pass  # Never let audit logging crash the caller
 
 def setup_terminal_logging(args) -> tuple:
     """Set up rotating segment logging to Data/Logs/Terminal/.

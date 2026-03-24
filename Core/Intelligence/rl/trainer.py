@@ -816,11 +816,10 @@ class RLTrainer(TrainerPhasesMixin, TrainerIOMixin):
                 )
                 is_pred_correct = (outcome_result == '1')
 
-                league_row = conn.execute(
-                    "SELECT name, region FROM leagues WHERE league_id = ?",
-                    (league_id,)
-                ).fetchone()
-                country_league = f"{league_row['region']} - {league_row['name']}" if league_row else 'Unknown'
+                # FIX-A2: Use country_league already fetched from schedules.country_league
+                # in the fixture tuple (f_cl, index 11). Avoids a secondary leagues query
+                # and ensures parity with the value stored for this specific fixture.
+                country_league_val = f_cl or 'Unknown'
 
                 day_rec_candidates.append({
                     'fixture_id': fixture_id,
@@ -828,55 +827,62 @@ class RLTrainer(TrainerPhasesMixin, TrainerIOMixin):
                     'away_team': a_name,
                     'market': pred_str,
                     'prediction': pred_str,
-                    'country_league': country_league,
+                    'country_league': country_league_val,
                     'confidence': 'High' if metrics.get('max_prob', 0) > 0.6 else 'Medium' if metrics.get('max_prob', 0) > 0.3 else 'Low',
                     'is_correct': is_pred_correct,
                 })
 
                 # ── Save prediction to DB (mirrors Ch1 P2 + --review) ──
+                # FIX-A3: Use upsert_prediction(conn, ...) directly so save and the
+                # immediate outcome update both use the same training connection.
+                # FIX-A1: Log save failures instead of silently swallowing them.
+                _save_failed = False
                 try:
-                    from Data.Access.db_helpers import save_prediction
-                    from Data.Access.league_db import update_prediction
+                    from Data.Access.league_db import upsert_prediction, update_prediction
+                    import json as _json
+                    from datetime import datetime as _dt
 
-                    _match_data = {
+                    _confidence = day_rec_candidates[-1]['confidence']
+                    _row = {
                         'fixture_id': fixture_id,
                         'date': f_date or match_date,
                         'match_time': f_time or '',
-                        'country_league': country_league,
+                        'country_league': country_league_val,
                         'home_team': h_name,
                         'away_team': a_name,
                         'home_team_id': home_tid,
                         'away_team_id': away_tid,
-                        'match_link': f_link or '',
-                        'league_stage': '',
-                    }
-                    _pred_result = {
-                        'type': pred_str,
-                        'confidence': day_rec_candidates[-1]['confidence'],
-                        'reason': [f'RL Phase {active_phase} training prediction'],
+                        'prediction': pred_str,
+                        'confidence': _confidence,
+                        'reason': f'RL Phase {active_phase} training prediction',
                         'xg_home': 0.0,
                         'xg_away': 0.0,
                         'btts': '',
-                        'over_2.5': '',
+                        'over_2_5': '',
                         'best_score': f'{h_score}-{a_score}',
-                        'top_scores': [],
-                        'home_tags': [],
-                        'away_tags': [],
-                        'h2h_tags': [],
-                        'standings_tags': [],
-                        'h2h_n': 0,
+                        'top_scores': '',
+                        'home_tags': '',
+                        'away_tags': '',
+                        'h2h_tags': '',
+                        'standings_tags': '',
+                        'h2h_count': 0,
                         'home_form_n': 0,
                         'away_form_n': 0,
                         'odds': '',
-                        'market_reliability': metrics.get('max_prob', 0) * 100,
+                        'market_reliability_score': metrics.get('max_prob', 0) * 100,
                         'recommendation_score': 0,
-                        'h2h_fixture_ids': [],
-                        'form_fixture_ids': [],
-                        'standings_snapshot': [],
+                        'h2h_fixture_ids': _json.dumps([]),
+                        'form_fixture_ids': _json.dumps([]),
+                        'standings_snapshot': _json.dumps([]),
+                        'match_link': f_link or '',
+                        'league_stage': '',
+                        'generated_at': _dt.now().isoformat(),
+                        'status': 'pending',
+                        'last_updated': _dt.now().isoformat(),
                     }
-                    save_prediction(_match_data, _pred_result)
+                    upsert_prediction(conn, _row)
 
-                    # Immediate outcome review (scores are known)
+                    # Immediate outcome review (scores already known from training loop)
                     update_prediction(conn, fixture_id, {
                         'actual_score': f'{h_score}-{a_score}',
                         'home_score': str(h_score),
@@ -885,7 +891,13 @@ class RLTrainer(TrainerPhasesMixin, TrainerIOMixin):
                         'status': 'reviewed',
                     })
                 except Exception as _save_err:
-                    pass  # Don't break training if save fails
+                    # FIX-A1: Never silently discard. Log so operator knows saves failed.
+                    _save_failed = True
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        f"[TRAIN] Prediction save failed for fixture {fixture_id} "
+                        f"({h_name} vs {a_name}): {_save_err}"
+                    )
 
             # ── Walk-forward Recommendation: select, evaluate, learn ──
             rec_day_acc = 0.0

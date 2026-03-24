@@ -1,12 +1,15 @@
 """
-ONE-TIME SCRIPT: Backfill country_league column in SQLite.
+MAINTENANCE SCRIPT: Backfill country_league values in SQLite.
 
-1. Renames region_league → country_league in schedules, predictions, live_scores
-2. Backfills country_league using leagues.json (league_id → country_code)
-   + countries table (country_code → country name)
+The region_league → country_league column rename is complete across all tables.
+This script now serves one purpose: filling NULL/empty country_league values in
+schedules, predictions, and live_scores using league_id lookups against
+leagues.json + the countries table.
+
+Safe to run repeatedly — only rows with NULL or empty country_league are updated.
 
 Run: python Scripts/backfill_country_league.py
-Then: python Leo.py --push   (to UPSERT corrected data to Supabase)
+Then: python Leo.py --push   (to push corrected data to Supabase)
 """
 
 import json
@@ -121,8 +124,8 @@ def main():
     print("  BACKFILL country_league (one-time migration)")
     print("=" * 60)
 
-    # Step 1: Rename columns
-    print("\n[1/3] Renaming region_league → country_league...")
+    # Step 1: Verify/fix any remaining region_league stragglers (rename is complete)
+    print("\n[1/3] Verifying country_league column name (rename is done, safety check only)...")
     for table in ("schedules", "predictions", "live_scores"):
         rename_column(conn, table, "region_league", "country_league")
 

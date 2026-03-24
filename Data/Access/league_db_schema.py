@@ -299,37 +299,12 @@ _ALTER_MIGRATIONS = [
     ("predictions", "is_available", "INTEGER DEFAULT 0"),
 ]
 
-# ── CSV → SQLite import map ───────────────────────────────────────────────────
-
-_CSV_TABLE_MAP = {
-    "schedules.csv": ("schedules", "fixture_id", {
-        "match_time": "time",
-        "match_link": "url",
-        "home_team": "home_team_name",
-        "away_team": "away_team_name",
-    }),
-    "teams.csv": ("teams", "team_id", {
-        "team_name": "name",
-        "team_crest": "crest",
-        "team_url": "url",
-    }),
-    "region_league.csv": ("leagues", "league_id", {
-        "league": "name",
-        "league_crest": "crest",
-        "league_url": "url",
-    }),
-    "predictions.csv": ("predictions", "fixture_id", {
-        "over_2.5": "over_2_5",
-    }),
-    "audit_log.csv": ("audit_log", "id", {}),
-    "fb_matches.csv": ("fb_matches", "site_match_id", {}),
-    "live_scores.csv": ("live_scores", "fixture_id", {}),
-    "accuracy_reports.csv": ("accuracy_reports", "report_id", {}),
-    "countries.csv": ("countries", "code", {}),
-    "profiles.csv": ("profiles", "id", {}),
-    "custom_rules.csv": ("custom_rules", "id", {}),
-    "rule_executions.csv": ("rule_executions", "id", {}),
-}
+# ── CSV → SQLite import map REMOVED (v7.0) ───────────────────────────────────
+# CSV is no longer a valid ingestion path. All data enters through the
+# upsert_*() functions in league_db.py (upsert_fixture, upsert_league,
+# upsert_team, upsert_prediction, etc.). There are no .csv files in the
+# production data pipeline. If you see any reference to _CSV_TABLE_MAP,
+# it is dead code and should be removed.
 
 # ── Computed standings SQL (v7.0) ─────────────────────────────────────────────
 
@@ -392,6 +367,5 @@ _COMPUTED_STANDINGS_SQL = """
 __all__ = [
     "_SCHEMA_SQL",
     "_ALTER_MIGRATIONS",
-    "_CSV_TABLE_MAP",
     "_COMPUTED_STANDINGS_SQL",
 ]

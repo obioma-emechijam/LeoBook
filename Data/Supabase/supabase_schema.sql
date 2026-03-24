@@ -1,10 +1,10 @@
 -- =============================================================================
--- GLOBAL SUPABASE SCHEMA (LeoBook) v5.0  (2026-03-18)
+-- GLOBAL SUPABASE SCHEMA (LeoBook) v6.0  (2026-03-24)
 -- Single source of truth. Columns MUST match sync_schema.py SUPABASE_SCHEMA.
--- v5.0: fb_matches simplified to essentials, computed_standings uses real season,
---       fb_match_candidates VIEW + RPCs + trigger REMOVED (matching now inline Python).
+-- v6.0: learning_weights PK renamed region_league → country_league (idempotent).
+--       Dead CSV language removed from comments.
+--       fb_matches booking/odds columns remain Supabase-removed (v5.0, intact).
 -- PostgreSQL naming: only [a-z0-9_] allowed in column names.
--- CSV "over_2.5" maps to Supabase "over_2_5" via sync_manager._COL_REMAP.
 -- =============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -215,7 +215,7 @@ DROP POLICY IF EXISTS "Public Read Access Teams" ON public.teams;
 CREATE POLICY "Public Read Access Teams" ON public.teams FOR
 SELECT USING (true);
 
--- region_league (9 CSV columns + search enrichment) — CSV key: league_id
+-- region_league (leagues mirror, 9 enrichment columns) — keyed by league_id
 CREATE TABLE IF NOT EXISTS public.region_league (
     league_id TEXT PRIMARY KEY,
     region TEXT,
@@ -418,12 +418,23 @@ SELECT USING (true);
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS public.learning_weights (
-    region_league TEXT PRIMARY KEY,
+    country_league TEXT PRIMARY KEY,
     weights JSONB NOT NULL DEFAULT '{}'::jsonb,
     confidence_calibration JSONB NOT NULL DEFAULT '{"Very High": 0.70, "High": 0.60, "Medium": 0.50, "Low": 0.40}'::jsonb,
     predictions_analyzed INTEGER DEFAULT 0,
     last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+-- Idempotent migration: rename old PK column if it still exists
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public'
+                 AND table_name = 'learning_weights'
+                 AND column_name = 'region_league') THEN
+        ALTER TABLE public.learning_weights RENAME COLUMN region_league TO country_league;
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'learning_weights rename skipped: %', SQLERRM;
+END $$;
 
 ALTER TABLE public.learning_weights ENABLE ROW LEVEL SECURITY;
 
