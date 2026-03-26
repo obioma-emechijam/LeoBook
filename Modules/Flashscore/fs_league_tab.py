@@ -65,7 +65,7 @@ async def extract_tab(
     row_sel: str = tab_selectors.get("match_row", "[id^='g_1_']")
 
     try:
-        resp = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        resp = await page.goto(url, wait_until="networkidle", timeout=60000)
         await fs_universal_popup_dismissal(page)
         if resp and resp.status >= 400:
             print(f"    [{tab.upper()}] HTTP {resp.status} — not available")
@@ -85,6 +85,24 @@ async def extract_tab(
         return 0
 
     await _expand_show_more(page, selector_mgr, CONTEXT_LEAGUE, MAX_SHOW_MORE)
+
+    # Content readiness gate: wait for .event__time elements to have rendered text
+    time_sel = tab_selectors.get("match_time", ".event__time")
+    try:
+        await page.wait_for_selector(time_sel, timeout=8000)
+        # Poll until at least one time element has actual text content
+        has_text = await page.evaluate("""(sel) => {
+            const els = document.querySelectorAll(sel);
+            for (const el of els) {
+                if (el.innerText && el.innerText.trim().length > 0) return true;
+            }
+            return false;
+        }""", time_sel)
+        if not has_text:
+            await asyncio.sleep(2)  # Extra buffer for text rendering
+            print(f"      [Hydrate] Waited extra 2s for time text rendering")
+    except Exception:
+        print(f"      [Hydrate] [!] No {time_sel} elements found — extraction may fail")
 
     # Pre-scan: count DOM rows for row-count parity check
     scanned_count = await page.locator(row_sel).count()
