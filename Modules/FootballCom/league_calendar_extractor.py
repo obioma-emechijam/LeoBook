@@ -13,6 +13,10 @@
 #   - Dates + kick-off times
 #   - FT scores (for finished matches)
 #   - Winner indicators
+#
+# v1.1 (2026-03-26): _scroll_to_load_all() now delegates to _scroll_to_load()
+#   from fs_league_hydration — adaptive micro-poll wait, bottom detection,
+#   scroll reset, and consistent logging.
 
 """
 League Calendar Extractor
@@ -24,6 +28,8 @@ import asyncio
 import re
 from typing import List, Dict, Optional
 from playwright.async_api import Page
+
+from Modules.Flashscore.fs_league_hydration import _scroll_to_load
 
 
 # ── Selectors (from fb_league_hub.html DOM analysis 2026-03-21) ─────────────
@@ -213,22 +219,18 @@ async def extract_league_calendar(
     return matches
 
 
-async def _scroll_to_load_all(page: Page, max_steps: int = 30):
-    """Scroll down to ensure all lazy-loaded rounds are visible."""
-    prev_count = 0
-    no_growth = 0
-    for step in range(max_steps):
-        count = await page.locator(_SEL_MATCH_LINK).count()
-        if count > prev_count:
-            prev_count = count
-            no_growth = 0
-        else:
-            no_growth += 1
-        if no_growth >= 3:
-            break
-        await page.evaluate("window.scrollBy(0, window.innerHeight)")
-        await asyncio.sleep(0.6)
-    await page.evaluate("window.scrollTo(0, 0)")
+async def _scroll_to_load_all(page: Page, max_steps: int = 30) -> None:
+    """Scroll down to ensure all lazy-loaded rounds are visible.
+    Delegates to _scroll_to_load() from fs_league_hydration for adaptive
+    micro-poll wait, bottom detection, scroll reset, and consistent logging.
+    """
+    await _scroll_to_load(
+        page,
+        row_selector=_SEL_MATCH_LINK,
+        max_steps=max_steps,
+        step_wait=0.6,
+        no_new_rows_limit=3,
+    )
 
 
 def build_league_calendar_url(country: str, league: str) -> str:

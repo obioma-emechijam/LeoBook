@@ -2,6 +2,9 @@
 #                    a single match from football.com. No-login only.
 # Part of LeoBook Modules — FootballCom
 #
+# v5.2 (2026-03-26): _recursive_scroll_markets() now delegates to
+#   _scroll_to_load() from fs_league_hydration — adaptive micro-poll wait,
+#   bottom detection, scroll reset, and consistent logging.
 # v5.1 (2026-03-17): + match date/time extraction from header.
 # v5.0 (2026-03-17): Intro dialog dismissal + recursive scroll + recursive
 #   expand + knowledge.json selectors + ranked_markets extraction + debug
@@ -25,6 +28,7 @@ from playwright.async_api import Page
 from Core.Utils.constants import now_ng
 from Core.Intelligence.selector_manager import SelectorManager
 from Data.Access.league_db import upsert_match_odds_batch
+from Modules.Flashscore.fs_league_hydration import _scroll_to_load
 
 
 # ── Market Catalogue (loaded once at import) ──────────────────────────────
@@ -151,29 +155,18 @@ async def _dismiss_intro_dialog(page: Page) -> None:
 async def _recursive_scroll_markets(page: Page) -> int:
     """
     Scrolls to load ALL [data-market-id] containers.
-    Stops only after 3 consecutive scrolls add zero new containers.
+    Delegates to _scroll_to_load() from fs_league_hydration for adaptive
+    micro-poll wait, bottom detection, scroll reset, and consistent logging.
     Returns: total count of containers found.
     """
     MARKET_CONTAINER_SEL = _sel("market_items") or "[data-market-id]"
-    no_growth_count = 0
-    prev_count = 0
-
-    for scroll_round in range(30):  # safety cap
-        count = await page.locator(MARKET_CONTAINER_SEL).count()
-
-        if count > prev_count:
-            no_growth_count = 0
-            prev_count = count
-        else:
-            no_growth_count += 1
-
-        if no_growth_count >= 3:
-            break
-
-        await page.evaluate("window.scrollBy(0, window.innerHeight)")
-        await asyncio.sleep(0.8)
-
-    return prev_count
+    return await _scroll_to_load(
+        page,
+        row_selector=MARKET_CONTAINER_SEL,
+        max_steps=30,
+        step_wait=0.8,
+        no_new_rows_limit=3,
+    )
 
 
 # ── Recursive Expand ──────────────────────────────────────────────────────
