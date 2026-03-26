@@ -368,10 +368,10 @@ def sync_region_flags(limit: Optional[int] = None):
 
         # ── Upload SVG (deduplicated — upload each ISO code only once) ────
         remote_name = f"4x3/{iso_code}.svg"
-        if f"4x3/{iso_code}" not in uploaded_svgs:
+        if f"4x3/{iso_code}.svg" not in uploaded_svgs:
             result = upload_to_supabase(storage, "flags", svg_path, remote_name)
             if result:
-                uploaded_svgs.add(f"4x3/{iso_code}")
+                uploaded_svgs.add(f"4x3/{iso_code}.svg")
 
         # ── Build public URL and write to SQLite ──────────────────────────
         public_url = _build_public_url(supabase_url, "flags", remote_name)
@@ -414,39 +414,60 @@ def sync_region_flags(limit: Optional[int] = None):
 
 
 def sync_country_flags(conn, client, uploaded_cache: set):
-    """Sync 1x1 and 4x3 flags for the countries table."""
+    """Sync 1x1 and 4x3 flags for the countries table.
+    
+    Uploads local SVGs to Supabase 'flags' bucket and writes back
+    the public Supabase URL to countries.flag_1x1 / countries.flag_4x3.
+    """
     storage = client.storage
     supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    if not supabase_url:
+        logger.error("[x] SUPABASE_URL not set — cannot build public URLs for country flags.")
+        return
     
     rows = conn.execute("SELECT code, name FROM countries").fetchall()
     logger.info(f"[*] Syncing flags for {len(rows)} countries...")
     
     updated_count = 0
+    skipped = 0
     for row in rows:
-        code = row["code"].lower()
-        
-        urls = {}
-        for ratio in ["1x1", "4x3"]:
-            remote_name = f"{ratio}/{code}.svg"
-            local_path = FLAG_ICONS_DIR / ratio / f"{code}.svg"
+        try:
+            code = (row["code"] if hasattr(row, "keys") else row[0]).lower()
             
-            if local_path.exists():
-                if remote_name not in uploaded_cache:
-                    result = upload_to_supabase(storage, "flags", local_path, remote_name)
-                    if result:
-                        uploaded_cache.add(remote_name)
+            urls = {}
+            for ratio in ["1x1", "4x3"]:
+                remote_name = f"{ratio}/{code}.svg"
+                local_path = FLAG_ICONS_DIR / ratio / f"{code}.svg"
                 
-                urls[f"flag_{ratio}"] = _build_public_url(supabase_url, "flags", remote_name)
-        
-        if urls:
-            urls['last_updated'] = datetime.now(timezone.utc).isoformat()
-            set_clause = ", ".join([f"{k} = ?" for k in urls.keys()])
-            params = list(urls.values()) + [row["code"]]
-            print(f"DEBUG: Updating {row['code']} with {urls}")
-            conn.execute(f"UPDATE countries SET {set_clause} WHERE code = ?", params)
-            updated_count += 1
+                if local_path.exists():
+                    # Upload if not already in cache (normalize cache keys to include .svg)
+                    cache_key = remote_name  # e.g. "1x1/af.svg"
+                    if cache_key not in uploaded_cache:
+                        result = upload_to_supabase(storage, "flags", local_path, remote_name)
+                        if result:
+                            uploaded_cache.add(cache_key)
+                    
+                    # Always build the full Supabase public URL
+                    urls[f"flag_{ratio}"] = _build_public_url(supabase_url, "flags", remote_name)
+            
+            if urls:
+                from Core.Utils.constants import now_ng
+                urls['last_updated'] = now_ng().isoformat()
+                set_clause = ", ".join([f"{k} = ?" for k in urls.keys()])
+                row_code = row["code"] if hasattr(row, "keys") else row[0]
+                params = list(urls.values()) + [row_code]
+                conn.execute(f"UPDATE countries SET {set_clause} WHERE code = ?", params)
+                updated_count += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            logger.warning(f"[!] Country flag sync failed for {row[0] if row else '?'}: {e}")
+            skipped += 1
             
     conn.commit()
+    print(f"  [Country Flags] {updated_count}/{len(rows)} countries updated with Supabase URLs")
+    if skipped:
+        print(f"  [Country Flags] {skipped} skipped (no local SVG or error)")
     logger.info(f"[✓] Country flags updated: {updated_count}/{len(rows)}")
 
 
