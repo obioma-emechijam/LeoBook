@@ -191,36 +191,115 @@ EXTRACT_FS_LEAGUE_ID_JS = r"""() => {
     return '';
 }"""
 
+# v2 (2026-03-26): Row-based iteration via archiveTable__row--entry.
+#   Fixes: current-season silently dropped (no year slug in href),
+#   winner data ignored, wait_for_selector too early, over-broad selector.
 EXTRACT_ARCHIVE_JS = r"""(selectors) => {
     const seasons = [], seen = new Set();
-    for (const sel of [selectors.archive_links, selectors.archive_table_links, 'a[href*="/football/"]']) {
-        if (!sel) continue;
-        for (const a of document.querySelectorAll(sel)) {
-            const href = a.getAttribute('href') || '';
-            // Refined regex: allow any prefix, capture country and slug. 
-            // Matches: /football/england/premier-league-2023-2024/ or premier-league-2023-2024/
-            const splitM = href.match(/\/football\/([^/]+)\/([^/]+-(\d{4})-(\d{4}))\/?/i) 
-                        || href.match(/\/([^/]+)\/([^/]+-(\d{4})-(\d{4}))\/?/i);
-            if (splitM && !seen.has(splitM[2])) {
-                seen.add(splitM[2]);
-                seasons.push({ slug: splitM[2], country: splitM[1],
-                    start_year: parseInt(splitM[3]), end_year: parseInt(splitM[4]),
-                    is_split: true, label: `${splitM[3]}/${splitM[4]}`,
-                    url: href.startsWith('http') ? href : (href.startsWith('/') ? 'https://www.flashscore.com' + href : 'https://www.flashscore.com/' + href) });
+
+    /* ── Primary: iterate archiveTable rows ─────────────────────── */
+    const rows = document.querySelectorAll('div.archiveTable__row--entry');
+    for (const row of rows) {
+        const cols  = row.querySelectorAll('div.archiveTable__column');
+        if (!cols.length) continue;
+
+        /* — Column 1: season link + label ——————————————————————— */
+        const link  = cols[0]?.querySelector('a.archiveTable__column--link');
+        const span  = link?.querySelector('span');
+        const label = span ? span.textContent.trim() : '';
+        const href  = link ? (link.getAttribute('href') || '') : '';
+
+        // Extract years from span text:  "Premier League 2025/2026" -> 2025, 2026
+        //                                "First Division 1991/1992" -> 1991, 1992
+        //                                "Superliga 2024"           -> 2024
+        let startYear = 0, endYear = 0, isSplit = false, seasonLabel = '';
+        const splitLabelM = label.match(/(\d{4})\/(\d{4})/);
+        const singleLabelM = !splitLabelM ? label.match(/(\d{4})/) : null;
+        if (splitLabelM) {
+            startYear = parseInt(splitLabelM[1]);
+            endYear   = parseInt(splitLabelM[2]);
+            isSplit   = true;
+            seasonLabel = `${startYear}/${endYear}`;
+        } else if (singleLabelM) {
+            startYear = parseInt(singleLabelM[1]);
+            endYear   = startYear;
+            seasonLabel = `${startYear}`;
+        } else {
+            continue;  // No recognisable year in label — skip
+        }
+
+        if (seen.has(seasonLabel)) continue;
+        seen.add(seasonLabel);
+
+        // Derive slug from href, tolerating current-season (no year in path)
+        const hrefM = href.match(/\/football\/([^/]+)\/([^/]+)\/?$/);
+        const country = hrefM ? hrefM[1] : '';
+        let slug = hrefM ? hrefM[2] : seasonLabel.replace('/', '-');
+        const fullUrl = href.startsWith('http') ? href
+                      : href.startsWith('/') ? 'https://www.flashscore.com' + href
+                      : 'https://www.flashscore.com/' + href;
+
+        /* — Column 2: winner data (optional) ———————————————————— */
+        let winnerName = null, winnerTeamId = null, winnerTeamUrl = null, winnerCrestUrl = null;
+        if (cols.length >= 2) {
+            const wLink = cols[1]?.querySelector('a.archiveTable__winner-content');
+            if (wLink) {
+                winnerName = wLink.textContent.trim();
+                const wHref = wLink.getAttribute('href') || '';
+                const teamM = wHref.match(/\/team\/([^/]+)\/([^/]+)\/?/);
+                if (teamM) {
+                    winnerTeamId  = teamM[2];
+                    winnerTeamUrl = wHref.startsWith('http') ? wHref
+                                 : 'https://www.flashscore.com' + wHref;
+                }
+                const logoSpan = wLink.querySelector('span.archiveTable__logo');
+                if (logoSpan) {
+                    const bg = logoSpan.getAttribute('style') || '';
+                    const bgM = bg.match(/url\(["']?([^"')]+)["']?\)/);
+                    if (bgM) winnerCrestUrl = bgM[1];
+                }
             }
-            const calM = href.match(/\/football\/([^/]+)\/([^/]+-(\d{4}))\/?$/i)
-                      || href.match(/\/([^/]+)\/([^/]+-(\d{4}))\/?$/i);
-            if (calM && !seen.has(calM[2])) {
-                if (![...seen].some(s => s.startsWith(calM[2] + '-'))) {
-                    seen.add(calM[2]);
-                    seasons.push({ slug: calM[2], country: calM[1],
-                        start_year: parseInt(calM[3]), end_year: parseInt(calM[3]),
-                        is_split: false, label: calM[3],
-                        url: href.startsWith('http') ? href : (href.startsWith('/') ? 'https://www.flashscore.com' + href : 'https://www.flashscore.com/' + href) });
+        }
+
+        seasons.push({
+            slug, country, start_year: startYear, end_year: endYear,
+            is_split: isSplit, label: seasonLabel, url: fullUrl,
+            winner_name: winnerName, winner_team_id: winnerTeamId,
+            winner_team_url: winnerTeamUrl, winner_crest_url: winnerCrestUrl
+        });
+    }
+
+    /* ── Fallback: link-based (pre-2024 DOM without archiveTable) ── */
+    if (seasons.length === 0) {
+        for (const sel of [selectors.archive_links, selectors.archive_table_links,
+                           'a.archiveTable__column--link', 'a[href*="/football/"]']) {
+            if (!sel) continue;
+            for (const a of document.querySelectorAll(sel)) {
+                const href = a.getAttribute('href') || '';
+                const splitM = href.match(/\/football\/([^/]+)\/([^/]+-(\d{4})-(\d{4}))\/?/i);
+                if (splitM && !seen.has(splitM[2])) {
+                    seen.add(splitM[2]);
+                    seasons.push({ slug: splitM[2], country: splitM[1],
+                        start_year: parseInt(splitM[3]), end_year: parseInt(splitM[4]),
+                        is_split: true, label: `${splitM[3]}/${splitM[4]}`,
+                        url: href.startsWith('http') ? href : (href.startsWith('/') ? 'https://www.flashscore.com' + href : 'https://www.flashscore.com/' + href),
+                        winner_name: null, winner_team_id: null, winner_team_url: null, winner_crest_url: null });
+                }
+                const calM = href.match(/\/football\/([^/]+)\/([^/]+-(\d{4}))\/?$/i);
+                if (calM && !seen.has(calM[2])) {
+                    if (![...seen].some(s => s.startsWith(calM[2] + '-'))) {
+                        seen.add(calM[2]);
+                        seasons.push({ slug: calM[2], country: calM[1],
+                            start_year: parseInt(calM[3]), end_year: parseInt(calM[3]),
+                            is_split: false, label: calM[3],
+                            url: href.startsWith('http') ? href : (href.startsWith('/') ? 'https://www.flashscore.com' + href : 'https://www.flashscore.com/' + href),
+                            winner_name: null, winner_team_id: null, winner_team_url: null, winner_crest_url: null });
+                    }
                 }
             }
         }
     }
+
     seasons.sort((a, b) => b.start_year - a.start_year || b.end_year - a.end_year);
     return seasons;
 }"""
@@ -259,7 +338,7 @@ async def get_archive_seasons(page: Page, league_url: str, selector_mgr, context
         link_sel = (
             selectors.get("archive_links")
             or selectors.get("archive_table_links")
-            or "a[href*='/football/']"
+            or "a.archiveTable__column--link"
         )
         try:
             await page.wait_for_selector(link_sel, timeout=20000)

@@ -64,9 +64,11 @@ from .league_calendar_extractor import extract_league_calendar, build_league_cal
 
 async def run_league_calendar_fixtures_sync(playwright: Playwright, league_ids: Optional[List[str]] = None):
     """
-    Phase 0: Fixture Discovery via League Hub Calendars.
-    Navigates to the calendar page of each mapped league and extracts all matches.
-    Saves results to the fb_matches table to seed resolution.
+    Phase 0: Fixture Discovery — primary via schedule extractor, calendar fallback.
+
+    v2 (2026-03-26): Reordered — extract_league_matches (fast, proven) is now
+    the primary path. extract_league_calendar is fallback only when primary
+    returns 0 matches.
     """
     print("\n--- Running League Calendar Fixture Sync (Phase 0) ---")
     
@@ -98,42 +100,80 @@ async def run_league_calendar_fixtures_sync(playwright: Playwright, league_ids: 
         for lid, entry in to_sync.items():
             country = entry.get('fb_country')
             league_name = entry.get('fb_league_name')
+            fb_url = entry.get('fb_url')
             
             if not country or not league_name:
                 continue
-                
-            calendar_url = build_league_calendar_url(country, league_name)
-            try:
-                matches = await extract_league_calendar(page, calendar_url)
-                if matches:
-                    # Normalize keys for db_helpers.save_site_matches
-                    normalized = []
-                    for m in matches:
-                        d_str, t_str = "Unknown", "Unknown"
-                        if m.get('date_time') and ' ' in m['date_time']:
-                            d_str, t_str = m['date_time'].split(' ', 1)
-                        
-                        normalized.append({
-                            'home': m.get('home_team'),
-                            'away': m.get('away_team'),
-                            'date': d_str,
-                            'time': t_str,
-                            'league': league_name,
-                            'url': m.get('match_url'),
-                            'status': m.get('status'),
-                            'score': f"{m.get('home_score')}-{m.get('away_score')}" if m.get('home_score') is not None else "N/A"
-                        })
-                    
-                    # Save to fb_matches table
-                    save_site_matches(normalized)
-                    total_discovered += len(normalized)
-                    print(f"    ✓ {league_name}: {len(normalized)} fixtures saved.")
-                else:
-                    print(f"    ! {league_name}: No fixtures found in calendar.")
 
-            except Exception as e:
-                print(f"    [Error] Failed to sync calendar for {league_name}: {e}")
-                
+            matches = []
+            source = "none"
+
+            # ── Primary: extract_league_matches (fast schedule extractor) ──
+            if fb_url:
+                try:
+                    raw = await extract_league_matches(
+                        page,
+                        target_league_name=league_name,
+                        fb_url=fb_url,
+                    )
+                    if raw:
+                        raw = await validate_match_data(raw)
+                    if raw:
+                        matches = raw
+                        source = "schedule"
+                except Exception as e:
+                    print(f"    [Primary] {league_name}: extract failed: {e}")
+
+            # ── Fallback: extract_league_calendar (slower, full calendar) ──
+            if not matches:
+                try:
+                    calendar_url = build_league_calendar_url(country, league_name)
+                    cal_raw = await extract_league_calendar(page, calendar_url)
+                    if cal_raw:
+                        # Normalize calendar format → same shape as schedule
+                        matches = []
+                        for m in cal_raw:
+                            d_str, t_str = "Unknown", "Unknown"
+                            if m.get('date_time') and ' ' in m['date_time']:
+                                d_str, t_str = m['date_time'].split(' ', 1)
+                            matches.append({
+                                'home': m.get('home_team'),
+                                'away': m.get('away_team'),
+                                'date': d_str,
+                                'time': t_str,
+                                'league': league_name,
+                                'url': m.get('match_url'),
+                                'status': m.get('status'),
+                                'score': f"{m.get('home_score')}-{m.get('away_score')}" if m.get('home_score') is not None else "N/A"
+                            })
+                        source = "calendar"
+                except Exception as e:
+                    print(f"    [Fallback] {league_name}: calendar failed: {e}")
+
+            # ── Save results ──
+            if matches:
+                # Schedule extractor already returns {home, away, date, time, league, url}
+                # Calendar fallback was normalized above — same shape
+                if source == "schedule":
+                    normalized = [{
+                        'home': m.get('home', ''),
+                        'away': m.get('away', ''),
+                        'date': m.get('date', 'Unknown'),
+                        'time': m.get('time', 'Unknown'),
+                        'league': league_name,
+                        'url': m.get('url', ''),
+                        'status': m.get('status', ''),
+                        'score': 'N/A',
+                    } for m in matches]
+                else:
+                    normalized = matches  # calendar fallback already normalized
+
+                save_site_matches(normalized)
+                total_discovered += len(normalized)
+                print(f"    ✓ {league_name}: {len(normalized)} fixtures saved (via {source}).")
+            else:
+                print(f"    ! {league_name}: No fixtures found.")
+
         await context.close()
     
     print(f"  [Calendar] Sync complete. Total fixtures discovered: {total_discovered}")

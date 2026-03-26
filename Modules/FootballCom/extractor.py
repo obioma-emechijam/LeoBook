@@ -2,7 +2,10 @@
 # Part of LeoBook Modules — Football.com
 #
 # Functions: extract_league_matches(), validate_match_data()
-
+#
+# v1.1 (2026-03-26): _recursive_scroll_cards() now delegates to _scroll_to_load()
+#   from fs_league_hydration — adaptive micro-poll wait, bottom detection,
+#   scroll reset, and consistent logging.
 """
 Extractor Module
 Handles extraction of leagues and matches from Football.com schedule pages.
@@ -14,40 +17,26 @@ from typing import List, Dict
 from playwright.async_api import Page
 
 from Core.Intelligence.selector_manager import SelectorManager
-
 from Core.Utils.constants import WAIT_FOR_LOAD_STATE_TIMEOUT
+from Modules.Flashscore.fs_league_hydration import _scroll_to_load
 from .navigator import hide_overlays
 from Core.Intelligence.aigo_suite import AIGOSuite
 
 
 async def _recursive_scroll_cards(page: Page, card_sel: str) -> int:
     """
-    Scrolls the page until no new cards appear for 3 consecutive rounds.
-    Same pattern as _recursive_scroll_markets in odds_extractor.py.
+    Scrolls the page until no new cards appear.
+    Delegates to _scroll_to_load() from fs_league_hydration for adaptive
+    micro-poll wait, bottom detection, scroll reset, and consistent logging.
     Returns: total count of cards found.
     """
-    no_growth = 0
-    prev_count = 0
-
-    for _ in range(40):  # safety cap
-        count = await page.locator(card_sel).count()
-
-        if count > prev_count:
-            no_growth = 0
-            prev_count = count
-            print(f"      [Scroll] {_+1} steps -> {count} rows visible")
-        else:
-            no_growth += 1
-
-        if no_growth >= 3:
-            break
-
-        await page.evaluate("window.scrollBy(0, window.innerHeight)")
-        await asyncio.sleep(0.8)
-
-    # Scroll back to top for consistent state
-    await page.evaluate("window.scrollTo(0, 0)")
-    return prev_count
+    return await _scroll_to_load(
+        page,
+        row_selector=card_sel,
+        max_steps=40,
+        step_wait=0.8,
+        no_new_rows_limit=3,
+    )
 
 async def _activate_and_wait_for_matches(
     page: Page,
