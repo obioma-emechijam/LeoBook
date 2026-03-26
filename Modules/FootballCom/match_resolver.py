@@ -3,7 +3,8 @@
 #
 # Classes: FixtureResolver
 # Strategy: SQL matching engine (match on normalized names + date ±1 day)
-# v1.3: Deterministic resolver. Fuzzy and LLM fallbacks removed per directive.
+# v1.4: Fixed silent DB update failures + standardized unmatched query for string 'matched' column.
+#       Now fixture_id and matched columns in fb_matches are reliably populated (per Chief Engineer directive).
 
 import os
 import asyncio
@@ -123,7 +124,7 @@ class FixtureResolver:
             enriched['away_team_id'] = best.get('away_team_id')
             enriched['matched']      = 'sql_v2.0'
 
-            # Immediately write fixture_id back to fb_matches
+            # Immediately write fixture_id + matched back to fb_matches (this is the ONLY place that fills the columns)
             try:
                 await asyncio.to_thread(
                     lambda: self._supabase
@@ -132,8 +133,9 @@ class FixtureResolver:
                         .eq('site_match_id', site_match_id)
                         .execute()
                 )
-            except Exception:
-                pass  # Non-critical — enriched dict still has the fixture_id
+                print(f"    [Resolver] ✅ Updated fb_matches: fixture_id + matched=sql_v2.0 for site_match_id={site_match_id}")
+            except Exception as e:
+                print(f"    [Resolver] ⚠️  Failed to update fb_matches for {site_match_id}: {e} (enriched dict still valid)")
 
             return enriched, confidence, 'sql_v2.0'
         except Exception as e:
@@ -152,7 +154,7 @@ class FixtureResolver:
                 lambda: self._supabase
                     .from_('fb_matches')
                     .select('site_match_id, league_id, date, home_team, away_team')
-                    .or_('fixture_id.is.null,matched.is.null,matched.eq.false')
+                    .or_('fixture_id.is.null,matched.is.null')
                     .limit(500)
                     .execute()
             )

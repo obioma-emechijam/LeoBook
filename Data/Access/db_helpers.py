@@ -13,9 +13,12 @@ All data persisted to leobook.db via league_db.py.
 import os
 import json
 import hashlib
+import logging
 from datetime import datetime as dt
 from typing import Dict, Any, List, Optional
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from Data.Access.league_db import (
     init_db, get_connection, upsert_prediction, update_prediction,

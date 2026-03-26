@@ -167,6 +167,7 @@ class EnsembleEngine:
             from Data.Access.league_db import get_connection
             from Data.Access.season_completeness import SeasonCompletenessTracker
             conn = get_connection()
+            SeasonCompletenessTracker._ensure_table()
 
             # Get all leagues tracked in season_completeness
             rows = conn.execute("""
