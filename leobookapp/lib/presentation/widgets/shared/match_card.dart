@@ -263,6 +263,8 @@ class _MatchCardState extends State<MatchCard> {
   // ─────────────────────────────────────────────────────────────
   Widget _buildTeamsRow(BuildContext context) {
     final crestSize = Responsive.sp(context, 30);
+    final isHome = _isFinished && match.winner == 'home';
+    final isAway = _isFinished && match.winner == 'away';
 
     return Row(
       children: [
@@ -271,6 +273,9 @@ class _MatchCardState extends State<MatchCard> {
           child: _TeamName(
             name: match.homeTeam,
             align: TextAlign.right,
+            isWinner: isHome,
+            redCards: match.homeRedCards,
+            alignRedCardsLeft: false,
           ),
         ),
         SizedBox(width: Responsive.sp(context, 6)),
@@ -297,6 +302,9 @@ class _MatchCardState extends State<MatchCard> {
           child: _TeamName(
             name: match.awayTeam,
             align: TextAlign.left,
+            isWinner: isAway,
+            redCards: match.awayRedCards,
+            alignRedCardsLeft: true,
           ),
         ),
       ],
@@ -308,13 +316,41 @@ class _MatchCardState extends State<MatchCard> {
     final hasScore = match.homeScore != null && match.awayScore != null;
 
     if (_isFinished && hasScore) {
-      // Type4: "1 : 1" score
-      return Text(
-        '${match.homeScore} : ${match.awayScore}',
-        style: LeoTypography.headlineMedium.copyWith(
-          color: AppColors.textPrimary,
-          fontWeight: FontWeight.w900,
-        ),
+      // Type4: score with winner highlighting
+      final homeWins = match.winner == 'home';
+      final awayWins = match.winner == 'away';
+      final winColor = AppColors.success;
+      final loseColor = AppColors.textTertiary.withValues(alpha: 0.6);
+      final neutralColor = AppColors.textPrimary;
+
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '${match.homeScore}',
+            style: LeoTypography.headlineMedium.copyWith(
+              color: homeWins ? winColor : (awayWins ? loseColor : neutralColor),
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: Responsive.sp(context, 4)),
+            child: Text(
+              ':',
+              style: LeoTypography.headlineMedium.copyWith(
+                color: AppColors.textTertiary,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+          Text(
+            '${match.awayScore}',
+            style: LeoTypography.headlineMedium.copyWith(
+              color: awayWins ? winColor : (homeWins ? loseColor : neutralColor),
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
       );
     }
 
@@ -606,23 +642,76 @@ class _TeamCrest extends StatelessWidget {
 class _TeamName extends StatelessWidget {
   final String name;
   final TextAlign align;
+  final bool isWinner;
+  final int redCards;
+  final bool alignRedCardsLeft;
 
   const _TeamName({
     required this.name,
     required this.align,
+    this.isWinner = false,
+    this.redCards = 0,
+    this.alignRedCardsLeft = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Text(
+    final nameWidget = Text(
       name,
       textAlign: align,
       maxLines: 2,
       overflow: TextOverflow.ellipsis,
       style: LeoTypography.bodyMedium.copyWith(
-        color: AppColors.textPrimary,
-        fontWeight: FontWeight.w600,
+        color: isWinner ? AppColors.success : AppColors.textPrimary,
+        fontWeight: isWinner ? FontWeight.w800 : FontWeight.w600,
       ),
+    );
+
+    if (redCards <= 0) return nameWidget;
+
+    // Red card badge
+    final redCardBadge = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+      decoration: BoxDecoration(
+        color: const Color(0xFFDC0000).withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 8,
+            height: 10,
+            decoration: BoxDecoration(
+              color: const Color(0xFFDC0000),
+              borderRadius: BorderRadius.circular(1.5),
+            ),
+          ),
+          if (redCards > 1) ...[
+            const SizedBox(width: 2),
+            Text(
+              '×$redCards',
+              style: LeoTypography.labelSmall.copyWith(
+                color: const Color(0xFFDC0000),
+                fontWeight: FontWeight.w700,
+                fontSize: 9,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+
+    return Column(
+      crossAxisAlignment: alignRedCardsLeft
+          ? CrossAxisAlignment.start
+          : CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        nameWidget,
+        const SizedBox(height: 2),
+        redCardBadge,
+      ],
     );
   }
 }

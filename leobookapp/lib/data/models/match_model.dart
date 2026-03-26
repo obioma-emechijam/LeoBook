@@ -46,6 +46,12 @@ class MatchModel {
   final String? outcomeCorrect; // From predictions CSV outcome_correct column
   final bool isAvailableInBookie;
 
+  final int homeRedCards;
+  final int awayRedCards;
+  final String? winner; // 'home', 'away', 'draw', or null
+  final String? leagueStage; // e.g. 'Round 32'
+  final String? season; // e.g. '2025/2026'
+
   MatchModel({
     required this.fixtureId,
     required this.date,
@@ -84,6 +90,11 @@ class MatchModel {
     this.pureModelSuggestion,
     this.outcomeCorrect,
     this.isAvailableInBookie = false,
+    this.homeRedCards = 0,
+    this.awayRedCards = 0,
+    this.winner,
+    this.leagueStage,
+    this.season,
   });
 
   Map<String, dynamic> toJson() => {
@@ -124,6 +135,11 @@ class MatchModel {
         "pure_model_suggestion": pureModelSuggestion,
         "outcome_correct": outcomeCorrect,
         "is_available": isAvailableInBookie,
+        "home_red_cards": homeRedCards,
+        "away_red_cards": awayRedCards,
+        "winner": winner,
+        "league_stage": leagueStage,
+        "season": season,
       };
 
   factory MatchModel.fromJson(Map<String, dynamic> json) => MatchModel.fromCsv(json, json);
@@ -166,6 +182,11 @@ class MatchModel {
     String? pureModelSuggestion,
     String? outcomeCorrect,
     bool? isAvailableInBookie,
+    int? homeRedCards,
+    int? awayRedCards,
+    String? winner,
+    String? leagueStage,
+    String? season,
   }) {
     return MatchModel(
       fixtureId: fixtureId ?? this.fixtureId,
@@ -205,6 +226,11 @@ class MatchModel {
       pureModelSuggestion: pureModelSuggestion ?? this.pureModelSuggestion,
       outcomeCorrect: outcomeCorrect ?? this.outcomeCorrect,
       isAvailableInBookie: isAvailableInBookie ?? this.isAvailableInBookie,
+      homeRedCards: homeRedCards ?? this.homeRedCards,
+      awayRedCards: awayRedCards ?? this.awayRedCards,
+      winner: winner ?? this.winner,
+      leagueStage: leagueStage ?? this.leagueStage,
+      season: season ?? this.season,
     );
   }
 
@@ -625,6 +651,11 @@ class MatchModel {
       pureModelSuggestion: pureModelSuggestion,
       outcomeCorrect: outcomeCorrect,
       isAvailableInBookie: isAvailable,
+      homeRedCards: int.tryParse(row['home_red_cards']?.toString() ?? '') ?? 0,
+      awayRedCards: int.tryParse(row['away_red_cards']?.toString() ?? '') ?? 0,
+      winner: row['winner']?.toString(),
+      leagueStage: row['league_stage']?.toString(),
+      season: row['season']?.toString(),
     );
   }
 
@@ -667,6 +698,11 @@ class MatchModel {
       pureModelSuggestion: pureModelSuggestion,
       outcomeCorrect: other.outcomeCorrect ?? outcomeCorrect,
       isAvailableInBookie: other.isAvailableInBookie,
+      homeRedCards: other.homeRedCards > 0 ? other.homeRedCards : homeRedCards,
+      awayRedCards: other.awayRedCards > 0 ? other.awayRedCards : awayRedCards,
+      winner: other.winner ?? winner,
+      leagueStage: other.leagueStage ?? leagueStage,
+      season: other.season ?? season,
     );
   }
 }

@@ -223,7 +223,9 @@ class _MatchDetailsScreenState extends State<MatchDetailsScreen> {
                       decoration: BoxDecoration(
                         color: Colors.white10,
                         borderRadius: BorderRadius.circular(18),
-                        border: Border.all(color: Colors.white24),
+                        border: Border.all(color: match.isFinished && match.winner == 'home'
+                            ? AppColors.success.withValues(alpha: 0.5)
+                            : Colors.white24),
                       ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(16),
@@ -241,11 +243,18 @@ class _MatchDetailsScreenState extends State<MatchDetailsScreen> {
                     const SizedBox(height: 10),
                     Text(
                       match.homeTeam,
-                      style: GoogleFonts.lexend(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w700),
+                      style: GoogleFonts.lexend(
+                        color: match.isFinished && match.winner == 'home' ? AppColors.success : Colors.white,
+                        fontSize: 13,
+                        fontWeight: match.isFinished && match.winner == 'home' ? FontWeight.w900 : FontWeight.w700,
+                      ),
                       textAlign: TextAlign.center,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
+                    if (match.homeRedCards > 0) ...[                      const SizedBox(height: 4),
+                      _buildRedCardBadge(match.homeRedCards),
+                    ],
                   ],
                 ),
               ),
@@ -301,12 +310,25 @@ class _MatchDetailsScreenState extends State<MatchDetailsScreen> {
                           ? '${match.homeScore} : ${match.awayScore}'
                           : 'VS',
                       style: GoogleFonts.lexend(
-                        color: match.isLive ? AppColors.liveRed : Colors.white24,
+                        color: match.isLive
+                            ? AppColors.liveRed
+                            : (match.isFinished ? Colors.white : Colors.white24),
                         fontSize: 28,
                         fontWeight: FontWeight.w900,
                         fontStyle: FontStyle.italic,
                       ),
                     ),
+                    if (match.leagueStage != null && match.leagueStage!.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        match.leagueStage!,
+                        style: GoogleFonts.lexend(
+                          color: Colors.white30,
+                          fontSize: 9,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
                     if (match.displayStatus.isNotEmpty) ...[
                       const SizedBox(height: 6),
                       Container(
@@ -335,7 +357,9 @@ class _MatchDetailsScreenState extends State<MatchDetailsScreen> {
                       decoration: BoxDecoration(
                         color: Colors.white10,
                         borderRadius: BorderRadius.circular(18),
-                        border: Border.all(color: Colors.white24),
+                        border: Border.all(color: match.isFinished && match.winner == 'away'
+                            ? AppColors.success.withValues(alpha: 0.5)
+                            : Colors.white24),
                       ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(16),
@@ -353,16 +377,57 @@ class _MatchDetailsScreenState extends State<MatchDetailsScreen> {
                     const SizedBox(height: 10),
                     Text(
                       match.awayTeam,
-                      style: GoogleFonts.lexend(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w700),
+                      style: GoogleFonts.lexend(
+                        color: match.isFinished && match.winner == 'away' ? AppColors.success : Colors.white,
+                        fontSize: 13,
+                        fontWeight: match.isFinished && match.winner == 'away' ? FontWeight.w900 : FontWeight.w700,
+                      ),
                       textAlign: TextAlign.center,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
+                    if (match.awayRedCards > 0) ...[                      const SizedBox(height: 4),
+                      _buildRedCardBadge(match.awayRedCards),
+                    ],
                   ],
                 ),
               ),
             ],
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRedCardBadge(int count) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: const Color(0xFFDC0000).withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 10,
+            height: 12,
+            decoration: BoxDecoration(
+              color: const Color(0xFFDC0000),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          if (count > 1) ...[
+            const SizedBox(width: 3),
+            Text(
+              '\u00d7$count',
+              style: GoogleFonts.lexend(
+                color: const Color(0xFFDC0000),
+                fontWeight: FontWeight.w700,
+                fontSize: 10,
+              ),
+            ),
+          ],
         ],
       ),
     );

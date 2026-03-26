@@ -527,7 +527,7 @@ class _TeamScreenState extends State<TeamScreen> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        _buildTeamColumn(match.homeTeam),
+                        _buildTeamColumn(match.homeTeam, crestUrl: match.homeCrestUrl),
                         const Text(
                           "VS",
                           style: TextStyle(
@@ -537,7 +537,7 @@ class _TeamScreenState extends State<TeamScreen> {
                             fontStyle: FontStyle.italic,
                           ),
                         ),
-                        _buildTeamColumn(match.awayTeam),
+                        _buildTeamColumn(match.awayTeam, crestUrl: match.awayCrestUrl),
                       ],
                     ),
                     const SizedBox(height: 20),
@@ -665,6 +665,27 @@ class _TeamScreenState extends State<TeamScreen> {
   }
 
   Widget _buildMatchList() {
+    // Group matches by round (leagueStage) — fall back to month
+    final Map<String, List<MatchModel>> grouped = {};
+    for (final m in _matches) {
+      String groupKey;
+      if (m.leagueStage != null && m.leagueStage!.isNotEmpty) {
+        groupKey = m.leagueStage!;
+      } else {
+        try {
+          final dt = DateTime.parse(m.date);
+          const months = [
+            'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+            'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'
+          ];
+          groupKey = '${months[dt.month - 1]} ${dt.year}';
+        } catch (_) {
+          groupKey = 'MATCHES';
+        }
+      }
+      grouped.putIfAbsent(groupKey, () => []).add(m);
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -685,15 +706,68 @@ class _TeamScreenState extends State<TeamScreen> {
                 letterSpacing: 1.2,
               ),
             ),
+            const Spacer(),
+            Text(
+              '${_matches.length} total',
+              style: GoogleFonts.lexend(
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                color: AppColors.textGrey,
+              ),
+            ),
           ],
         ),
         const SizedBox(height: 12),
-        ..._matches.map(
-          (m) => Padding(
-            padding: const EdgeInsets.only(bottom: 8.0),
-            child: MatchCard(match: m),
+        ...grouped.entries.expand((section) => [
+          // Round header
+          Container(
+            margin: const EdgeInsets.only(bottom: 8, top: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: AppColors.primary.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: AppColors.primary.withValues(alpha: 0.15)),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 3,
+                  height: 14,
+                  decoration: BoxDecoration(
+                    color: AppColors.primary,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  section.key.toUpperCase(),
+                  style: GoogleFonts.lexend(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                    color: AppColors.primary,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  '${section.value.length} match${section.value.length == 1 ? '' : 'es'}',
+                  style: GoogleFonts.lexend(
+                    fontSize: 9,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textGrey,
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
+          // Match cards for this round
+          ...section.value.map(
+            (m) => Padding(
+              padding: const EdgeInsets.only(bottom: 8.0),
+              child: MatchCard(match: m),
+            ),
+          ),
+        ]),
       ],
     );
   }
